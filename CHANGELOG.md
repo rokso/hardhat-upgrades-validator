@@ -18,6 +18,7 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 - The deploy hook and `record-baseline` write `.storage-layouts/` records; they no longer write `upgradeStorageLayout`. The field is still read as a deprecated fallback.
 - `record-baseline` needs an RPC, and `--force` no longer skips the bytecode check.
 - `validate-upgrade --all` covers every proxy deployment, not only those with a stamped baseline.
+- With a reachable network, `upgradeStorageLayout` is no longer a fallback for a proxy whose implementation the chain reports: if that implementation's layout cannot be obtained (no record, no explorer), `validate-upgrade` reports an error and `assertProxyUpgrade` throws `BaselineUnavailableError`, where alpha.1 passed. Record the layout once (`record-baseline --contract <name>`, or configure an explorer), or opt out with `--baseline deployment`.
 
 ## 0.1.0-alpha.1 (2026-04-08)
 

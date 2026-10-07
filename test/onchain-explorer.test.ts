@@ -73,6 +73,14 @@ describe("fetchVerifiedSource", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("is unavailable with an empty API key, and makes no request", async () => {
+    const fetchImpl = vi.fn();
+    await expect(fetchVerifiedSource(1, ADDRESS, { apiKey: "" }, fetchImpl)).rejects.toThrow(
+      BaselineUnavailableError,
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("queries Etherscan v2 with the chain id by default", async () => {
     const fetchImpl = vi
       .fn()

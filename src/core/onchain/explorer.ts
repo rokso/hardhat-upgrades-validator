@@ -53,7 +53,7 @@ const MAX_ATTEMPTS = 4;
  * Blockscout instance) may not.
  */
 export function canQueryExplorer(config: ExplorerConfig): boolean {
-  return config.apiKey !== undefined || config.apiUrl !== undefined;
+  return Boolean(config.apiKey) || Boolean(config.apiUrl);
 }
 
 export async function fetchVerifiedSource(
@@ -73,7 +73,7 @@ export async function fetchVerifiedSource(
   url.searchParams.set("module", "contract");
   url.searchParams.set("action", "getsourcecode");
   url.searchParams.set("address", address);
-  if (config.apiKey !== undefined) url.searchParams.set("apikey", config.apiKey);
+  if (config.apiKey) url.searchParams.set("apikey", config.apiKey);
 
   const entry = await requestWithRetry(url.toString(), fetchImpl);
   return parseSourceCodeEntry(entry, address);

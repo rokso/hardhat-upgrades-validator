@@ -65,12 +65,6 @@ export async function resolveImplementationLayout(
           `that address. If the record was copied from another chain, delete it and re-run.`,
       );
     }
-    if (!isProvingMatch(stored.bytecodeMatch)) {
-      throw new BaselineIntegrityError(
-        `The layout record for ${address} rests on a "${String(stored.bytecodeMatch)}" match, which ` +
-          `does not prove a storage layout. Delete it and re-run.`,
-      );
-    }
     return { implementation: address, record: stored, origin: "store" };
   }
 

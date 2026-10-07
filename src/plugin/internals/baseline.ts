@@ -85,7 +85,8 @@ export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBas
     throw new BaselineUnavailableError(
       `"${ctx.name}" runs implementation ${implementation}, but its layout could not be obtained: ` +
         `${e.message} No other baseline is used, because only this implementation's layout is ` +
-        `correct. Configure an explorer or run record-baseline --from-chain.`,
+        `correct. Record it from a matching local build (record-baseline --contract ${ctx.name}), ` +
+        `configure an explorer, or opt out with --baseline deployment.`,
     );
   }
 }
@@ -95,18 +96,22 @@ export function explorerConfig(
   networkName: string,
 ): { apiKey?: string; apiUrl?: string } {
   const configured = config?.explorers?.[networkName];
+  // Empty strings count as unset: CI passes "" for a missing secret.
+  const apiUrl = configured?.apiUrl || undefined;
   // ETHERSCAN_API_KEY goes only to Etherscan, never to a third-party apiUrl.
-  const etherscan = configured?.apiUrl === undefined || isEtherscan(configured.apiUrl);
-  const apiKey = configured?.apiKey ?? (etherscan ? process.env.ETHERSCAN_API_KEY : undefined);
+  const etherscan = apiUrl === undefined || isEtherscan(apiUrl);
+  const apiKey =
+    configured?.apiKey || (etherscan ? process.env.ETHERSCAN_API_KEY || undefined : undefined);
   return {
     ...(apiKey !== undefined ? { apiKey } : {}),
-    ...(configured?.apiUrl !== undefined ? { apiUrl: configured.apiUrl } : {}),
+    ...(apiUrl !== undefined ? { apiUrl } : {}),
   };
 }
 
 function isEtherscan(apiUrl: string): boolean {
   try {
-    return new URL(apiUrl).host === new URL(ETHERSCAN_V2_API_URL).host;
+    const url = new URL(apiUrl);
+    return url.protocol === "https:" && url.host === new URL(ETHERSCAN_V2_API_URL).host;
   } catch {
     return false;
   }

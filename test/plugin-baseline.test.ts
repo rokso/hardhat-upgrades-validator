@@ -152,6 +152,14 @@ describe("resolveBaseline", () => {
     expect(vi.mocked(resolveImplementationLayout)).not.toHaveBeenCalled();
   });
 
+  it("offline: refuses a record that rests on a metadata-only match", async () => {
+    await writeLayoutRecord(storeDir(), {
+      ...record(NEWER, newerLayout),
+      bytecodeMatch: "metadata-only" as never,
+    });
+    await expect(resolveBaseline(ctx())).rejects.toThrow(BaselineIntegrityError);
+  });
+
   it("auto: no provider means offline without a warning", async () => {
     await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
     const r = await resolveBaseline(ctx());
@@ -228,6 +236,30 @@ describe("explorerConfig", () => {
           "mainnet",
         ),
       ).toEqual({ apiKey: "ENVKEY", apiUrl: "https://api.etherscan.io/v2/api" });
+    }));
+
+  it("treats an empty key as unset, as CI passes for a missing secret", () => {
+    const prev = process.env.ETHERSCAN_API_KEY;
+    process.env.ETHERSCAN_API_KEY = "";
+    try {
+      expect(explorerConfig(undefined, "mainnet")).toEqual({});
+      expect(
+        explorerConfig({ explorers: { mainnet: { apiKey: "", apiUrl: "" } } }, "mainnet"),
+      ).toEqual({});
+    } finally {
+      if (prev === undefined) delete process.env.ETHERSCAN_API_KEY;
+      else process.env.ETHERSCAN_API_KEY = prev;
+    }
+  });
+
+  it("does not send ETHERSCAN_API_KEY over plain http", () =>
+    withEnvKey(() => {
+      expect(
+        explorerConfig(
+          { explorers: { mainnet: { apiUrl: "http://api.etherscan.io/v2/api" } } },
+          "mainnet",
+        ),
+      ).toEqual({ apiUrl: "http://api.etherscan.io/v2/api" });
     }));
 
   it("never sends ETHERSCAN_API_KEY to a third-party explorer", () =>

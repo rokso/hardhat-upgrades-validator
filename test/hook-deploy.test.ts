@@ -82,7 +82,7 @@ async function readRecord(dir: string, address: string) {
   }
 }
 
-function makeHre(provider: { send: unknown } | undefined) {
+function makeHre(provider: { send: unknown } | undefined, type = "http") {
   return {
     globalOptions: { network: "localhost" },
     config: { paths: { root: tmpDir, cache: join(tmpDir, "cache") } },
@@ -97,13 +97,15 @@ function makeHre(provider: { send: unknown } | undefined) {
       getBuildInfoOutputPath: vi.fn().mockResolvedValue(undefined),
     },
     network: {
-      connect: vi
-        .fn()
-        .mockImplementation(() =>
-          provider === undefined
-            ? Promise.reject(new Error("no network"))
-            : Promise.resolve({ provider, close: vi.fn().mockResolvedValue(undefined) }),
-        ),
+      connect: vi.fn().mockImplementation(() =>
+        provider === undefined
+          ? Promise.reject(new Error("no network"))
+          : Promise.resolve({
+              provider,
+              networkConfig: { type },
+              close: vi.fn().mockResolvedValue(undefined),
+            }),
+      ),
     },
   };
 }
@@ -202,6 +204,15 @@ describe("implementation layout recording", () => {
 
     expect(result).toBe("deploy-result");
     expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+  });
+
+  it("skips in-process networks, whose fresh chain cannot hold what was deployed", async () => {
+    const chain = liveChain();
+    const result = await deployOverride({}, makeHre(chain, "edr-simulated") as never, runSuper());
+
+    expect(result).toBe("deploy-result");
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+    expect(chain.send).not.toHaveBeenCalled();
   });
 
   it("does not fail the deploy when an existing record is malformed", async () => {

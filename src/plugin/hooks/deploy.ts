@@ -75,6 +75,14 @@ async function recordImplementationLayouts(hre: HardhatRuntimeEnvironment): Prom
   const connection = await hre.network.connect().catch(() => undefined);
   const provider = connection?.provider;
   try {
+    // Each connection to an in-process network is a fresh chain, so the
+    // contracts this deploy created are not on it: nothing could be proven.
+    if (connection?.networkConfig.type === "edr-simulated") {
+      logger.log(
+        `[INFO] "${targetNetwork}" is an in-process network; skipped recording implementation layouts.`,
+      );
+      return;
+    }
     if (
       provider === undefined ||
       !(await probe(provider).then(
@@ -129,12 +137,18 @@ async function recordImplementationLayouts(hre: HardhatRuntimeEnvironment): Prom
       }
 
       try {
-        await recordLocalBuild(provider, storeDir, address, {
+        const { bytecodeMatch } = await recordLocalBuild(provider, storeDir, address, {
           contract: `${artifact.sourceName}:${artifact.contractName}`,
           layout: upgradeStorageLayout,
           deployedBytecode: artifact.deployedBytecode,
           immutableReferences: artifact.immutableReferences,
         });
+        if (bytecodeMatch === "metadata-only") {
+          logger.warn(
+            `Did not record ${name} (${address}): the local build matches the chain only after ` +
+              `stripping metadata, which does not prove its storage layout.`,
+          );
+        }
       } catch (e) {
         // A failed record must not fail a deploy that already succeeded.
         logger.warn(`Could not record the layout of ${name} (${address}): ${(e as Error).message}`);

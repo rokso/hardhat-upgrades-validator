@@ -10,6 +10,8 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tryReadJsonFile, writeJsonFile } from "../../utils/io.js";
+import { isProvingMatch } from "../bytecode-utils.js";
+import { BaselineIntegrityError } from "./errors.js";
 import type { ImplementationLayoutRecord } from "./types.js";
 
 export const LAYOUT_STORE_DIRNAME = ".storage-layouts";
@@ -27,6 +29,13 @@ export async function readLayoutRecord(
   if (record.format !== 1) {
     throw new Error(
       `Unsupported layout record format ${String(record.format)} for ${address}; upgrade hardhat-upgrades-validator.`,
+    );
+  }
+  // Checked here so offline readers refuse weak records too, not just the chain path.
+  if (!isProvingMatch(record.bytecodeMatch)) {
+    throw new BaselineIntegrityError(
+      `The layout record for ${address} rests on a "${String(record.bytecodeMatch)}" match, which ` +
+        `does not prove a storage layout. Delete it, or re-run record-baseline with --force.`,
     );
   }
   return record;

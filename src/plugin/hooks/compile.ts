@@ -287,14 +287,21 @@ async function runAutoValidation(
       // Compiling must not need an RPC or explorer, so this is always offline:
       // the stored record for the deployment file's implementation, else the
       // deprecated field. validate-upgrade and assertProxyUpgrade read the chain.
-      const baseline = await resolveBaseline({
-        name,
-        deployment,
-        deploymentsDir,
-        networkName: network,
-        mode: "auto",
-        config: context.config.upgradesValidator,
-      });
+      let baseline;
+      try {
+        baseline = await resolveBaseline({
+          name,
+          deployment,
+          deploymentsDir,
+          networkName: network,
+          mode: "auto",
+          config: context.config.upgradesValidator,
+        });
+      } catch (err) {
+        logger.error(`Could not read the baseline for "${name}": ${(err as Error).message}`);
+        anyErrors = true;
+        continue;
+      }
       const oldLayout = baseline.layout;
       if (oldLayout === undefined) continue;
 

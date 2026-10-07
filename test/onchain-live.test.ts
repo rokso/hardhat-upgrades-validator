@@ -51,82 +51,92 @@ function escape(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-describe.skipIf(!RPC || !PROXY || !EXPLORER.apiKey)("live: proxy on a real chain", () => {
-  let tmpDir: string;
-  let baseline: ChainBaseline;
-  let input: SolcInput;
-  // The first namespaced struct of the live layout, located in its source file.
-  let target: { file: string; open: RegExp; close: RegExp } | undefined;
+describe.skipIf(!RPC || !PROXY || !(EXPLORER.apiKey || EXPLORER.apiUrl))(
+  "live: proxy on a real chain",
+  () => {
+    let tmpDir: string;
+    let baseline: ChainBaseline;
+    let input: SolcInput;
+    // The first namespaced struct of the live layout, located in its source file.
+    let target: { file: string; open: RegExp; close: RegExp } | undefined;
 
-  beforeAll(async () => {
-    tmpDir = await mkdtemp(join(tmpdir(), "hhuv-live-"));
-    baseline = await resolveChainBaseline(PROXY!, {
-      provider,
-      storeDir: tmpDir,
-      explorer: EXPLORER,
-    });
-    const chainId = await readChainId(provider);
-    input = (await fetchVerifiedSource(chainId, baseline.implementation, EXPLORER)).input;
+    beforeAll(async () => {
+      tmpDir = await mkdtemp(join(tmpdir(), "hhuv-live-"));
+      baseline = await resolveChainBaseline(PROXY!, {
+        provider,
+        storeDir: tmpDir,
+        explorer: EXPLORER,
+      });
+      const chainId = await readChainId(provider);
+      input = (await fetchVerifiedSource(chainId, baseline.implementation, EXPLORER)).input;
 
-    for (const namespace of Object.keys(baseline.record.layout.namespaces ?? {})) {
-      const id = escape(namespace.replace(/^erc7201:/, ""));
-      const head = `(@custom:storage-location erc7201:${id}\\s*\\n\\s*struct \\w+ \\{\\n)`;
-      const open = new RegExp(head);
-      const close = new RegExp(
-        `(@custom:storage-location erc7201:${id}\\s*\\n\\s*struct \\w+ \\{[^}]*)(\\n\\s*\\})`,
-      );
-      const file = Object.keys(input.sources).find((f) =>
-        open.test(input.sources[f].content ?? ""),
-      );
-      if (file !== undefined) {
-        target = { file, open, close };
-        break;
+      for (const namespace of Object.keys(baseline.record.layout.namespaces ?? {})) {
+        const id = escape(namespace.replace(/^erc7201:/, ""));
+        const head = `(@custom:storage-location erc7201:${id}\\s*\\n\\s*struct \\w+ \\{\\n)`;
+        const open = new RegExp(head);
+        const close = new RegExp(
+          `(@custom:storage-location erc7201:${id}\\s*\\n\\s*struct \\w+ \\{[^}]*)(\\n\\s*\\})`,
+        );
+        const file = Object.keys(input.sources).find((f) =>
+          open.test(input.sources[f].content ?? ""),
+        );
+        if (file !== undefined) {
+          target = { file, open, close };
+          break;
+        }
       }
+    }, 600_000);
+
+    afterAll(async () => {
+      await rm(tmpDir, { recursive: true });
+    });
+
+    function edited(transform: (content: string) => string): SolcInput {
+      const content = input.sources[target!.file].content!;
+      const changed = transform(content);
+      expect(changed).not.toBe(content); // the edit must have landed
+      return { ...input, sources: { ...input.sources, [target!.file]: { content: changed } } };
     }
-  }, 600_000);
 
-  afterAll(async () => {
-    await rm(tmpDir, { recursive: true });
-  });
+    async function check(changed: SolcInput) {
+      const solc = await getSolc(baseline.record.compiler!);
+      const layout = await layoutFromSource(changed, solc, baseline.record.contract);
+      return validateStorageUpgrade("live", baseline.record.layout, layout, { kind: "uups" });
+    }
 
-  function edited(transform: (content: string) => string): SolcInput {
-    const content = input.sources[target!.file].content!;
-    const changed = transform(content);
-    expect(changed).not.toBe(content); // the edit must have landed
-    return { ...input, sources: { ...input.sources, [target!.file]: { content: changed } } };
-  }
+    it("locates a namespaced struct of the live layout in the verified source", (ctx) => {
+      if (Object.keys(baseline.record.layout.namespaces ?? {}).length === 0) ctx.skip();
+      // A layout with namespaces whose struct the edits cannot find would make the
+      // insert/append checks below skip, so a green run would prove nothing.
+      expect(target).toBeDefined();
+    });
 
-  async function check(changed: SolcInput) {
-    const solc = await getSolc(baseline.record.compiler!);
-    const layout = await layoutFromSource(changed, solc, baseline.record.contract);
-    return validateStorageUpgrade("live", baseline.record.layout, layout, { kind: "uups" });
-  }
+    it("proves the live implementation against its deployed code", () => {
+      expect(["exact", "immutables-only"]).toContain(baseline.record.bytecodeMatch);
+      expect(baseline.record.contract).toMatch(/:\w+$/);
+    });
 
-  it("proves the live implementation against its deployed code", () => {
-    expect(["exact", "immutables-only"]).toContain(baseline.record.bytecodeMatch);
-    expect(baseline.record.contract).toMatch(/:\w+$/);
-  });
+    it("validates the verified source against itself", async () => {
+      const result = await check(input);
+      expect(result.errors).toEqual([]);
+      expect(result.ok).toBe(true);
+    }, 600_000);
 
-  it("validates the verified source against itself", async () => {
-    const result = await check(input);
-    expect(result.errors).toEqual([]);
-    expect(result.ok).toBe(true);
-  }, 600_000);
+    it("passes a field appended to a namespace", async (ctx) => {
+      if (target === undefined) ctx.skip(); // the target has no namespaced storage
+      const result = await check(
+        edited((c) => c.replace(target!.close, "$1\n        uint256 _appended;$2")),
+      );
+      expect(result.ok).toBe(true);
+    }, 600_000);
 
-  it("passes a field appended to a namespace", async (ctx) => {
-    if (target === undefined) ctx.skip(); // the target has no namespaced storage
-    const result = await check(
-      edited((c) => c.replace(target!.close, "$1\n        uint256 _appended;$2")),
-    );
-    expect(result.ok).toBe(true);
-  }, 600_000);
-
-  it("fails a field inserted at the start of a namespace", async (ctx) => {
-    if (target === undefined) ctx.skip();
-    const result = await check(
-      edited((c) => c.replace(target!.open, "$1        uint256 _inserted;\n")),
-    );
-    expect(result.ok).toBe(false);
-    expect(JSON.stringify(result.errors)).toMatch(/inserted/);
-  }, 600_000);
-});
+    it("fails a field inserted at the start of a namespace", async (ctx) => {
+      if (target === undefined) ctx.skip();
+      const result = await check(
+        edited((c) => c.replace(target!.open, "$1        uint256 _inserted;\n")),
+      );
+      expect(result.ok).toBe(false);
+      expect(JSON.stringify(result.errors)).toMatch(/inserted/);
+    }, 600_000);
+  },
+);

@@ -288,7 +288,7 @@ import {
 
 ### `assertProxyUpgrade(hre, contractName, options?)`
 
-Throws `StorageLayoutError` if the upgrade is storage-incompatible. Use this inside deploy scripts to abort before touching the chain.
+Throws `StorageLayoutError` if the upgrade is storage-incompatible. Use this inside deploy scripts to abort before touching the chain. It throws `BaselineUnavailableError` or `BaselineIntegrityError` (exported from `hardhat-upgrades-validator/onchain`) when no trustworthy baseline can be obtained for the implementation the proxy runs: in that case it never passes by comparing against something else.
 
 ```ts
 await assertProxyUpgrade(hre, "MyToken");
@@ -456,7 +456,9 @@ const result = validateStorageUpgrade("MyToken", record.layout, newLayout, { kin
 
 ## Upgrading from 0.1.0-alpha.1
 
-Nothing is required. On the next `validate-upgrade` or `assertProxyUpgrade` with a reachable network, baselines come from the chain and are recorded as they are first needed. Existing `upgradeStorageLayout` fields keep working as a fallback, with a deprecation warning.
+With a reachable network, baselines come from the chain. Each implementation's layout must be recorded once, either from verified source (needs an explorer: `ETHERSCAN_API_KEY` or `upgradesValidator.explorers`) or from a matching local build (`record-baseline --contract <name>`, no explorer needed). Validation records it on first use when an explorer is configured.
+
+Existing `upgradeStorageLayout` fields are used only when the chain cannot say which implementation a proxy runs (offline, or no proxy slot), with a deprecation warning. Once the chain names the implementation and no layout for it can be obtained, validation fails instead of falling back to the field, which cannot be tied to any implementation. To keep the alpha.1 behavior explicitly, pass `--baseline deployment` / `baseline: "deployment"`.
 
 Behavior changes:
 
