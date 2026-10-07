@@ -1,19 +1,18 @@
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
 import { join } from "node:path";
+import type { ImmutableReferences } from "../../core/bytecode-utils.js";
 import { listDirOrEmpty, tryReadJsonFile } from "../../utils/io.js";
 
 export interface DeploymentFile {
   address?: string;
   deployedBytecode?: string;
   /**
-   * OZ-format storage layout snapshot. Populated by `record-baseline` and
-   * used as the baseline for upgrade validation.
+   * Deprecated OZ-format layout snapshot written by 0.1.0-alpha.1. Still read
+   * as an offline fallback; never written.
    */
   upgradeStorageLayout?: StorageLayout;
-  /**
-   * Address of the implementation contract.
-   */
-  implementation?: string;
+  /** Lets `deployedBytecode` be compared with on-chain code, immutables masked. */
+  immutableReferences?: ImmutableReferences;
   /**
    * The Solidity contract name that was actually compiled and deployed.
    */
@@ -50,32 +49,19 @@ export async function listDeployedContractsWithLayout(deploymentsDir: string): P
   return names;
 }
 
-// hardhat-deploy's companion files for a proxy deployment `X`; validating them
-// would compare the proxy's or the bare implementation's code, not `X`.
-const COMPANION_SUFFIXES = ["_Proxy", "_Implementation"];
-
-/**
- * Returns deployments that can have a baseline: proxies (an `implementation`
- * field, so the chain or a stored record can supply one) and deployments that
- * still carry a deprecated `upgradeStorageLayout`.
- */
-export async function listDeployedProxies(deploymentsDir: string): Promise<string[]> {
-  const files = await listDirOrEmpty(deploymentsDir);
-
-  const names: string[] = [];
-  for (const file of files) {
-    if (!file.endsWith(".json")) continue;
+/** Every deployment file in the directory, by deployment name. */
+export async function readDeployments(
+  deploymentsDir: string,
+): Promise<Map<string, DeploymentFile>> {
+  const deployments = new Map<string, DeploymentFile>();
+  for (const file of (await listDirOrEmpty(deploymentsDir)).sort()) {
+    // Dotfiles (`.migrations.json`, `.chainId`) are hardhat-deploy's bookkeeping.
+    if (!file.endsWith(".json") || file.startsWith(".")) continue;
     const name = file.slice(0, -5);
-    if (COMPANION_SUFFIXES.some((s) => name.endsWith(s))) continue;
     const deployment = await readDeployment(deploymentsDir, name);
-    if (
-      deployment?.implementation !== undefined ||
-      deployment?.upgradeStorageLayout !== undefined
-    ) {
-      names.push(name);
-    }
+    if (deployment !== null) deployments.set(name, deployment);
   }
-  return names;
+  return deployments;
 }
 
 /**

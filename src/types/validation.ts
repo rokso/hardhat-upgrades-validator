@@ -32,8 +32,8 @@ export interface ValidationResult {
  * never has to guess what was compared.
  *
  * - `chain`: the implementation the proxy runs now, read from the chain.
- * - `offline-record`: a stored record for the implementation named in the
- *   deployment file; correct unless the proxy and the file have drifted apart.
+ * - `offline-record`: a stored record for the implementation the proxy index
+ *   says the proxy ran at `observedAtBlock`; stale if it was upgraded since.
  * - `deployment-file`: the deprecated `upgradeStorageLayout` field.
  * - `none`: no baseline available.
  */
@@ -44,7 +44,12 @@ export type BaselineInfo =
       bytecodeMatch: string;
       origin: "store" | "explorer";
     }
-  | { source: "offline-record"; implementation: string; bytecodeMatch: string }
+  | {
+      source: "offline-record";
+      implementation: string;
+      bytecodeMatch: string;
+      observedAtBlock: number;
+    }
   | { source: "deployment-file" }
   | { source: "none" };
 

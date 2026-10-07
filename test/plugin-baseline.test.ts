@@ -23,7 +23,7 @@ import {
 } from "../src/plugin/internals/baseline.js";
 import { resolveImplementationLayout } from "../src/core/onchain/baseline.js";
 import { BaselineIntegrityError, BaselineUnavailableError } from "../src/core/onchain/errors.js";
-import { writeLayoutRecord } from "../src/core/onchain/store.js";
+import { updateProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
 import type { ImplementationLayoutRecord } from "../src/core/onchain/types.js";
 import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 
@@ -49,6 +49,18 @@ function record(address: string, layout: object): ImplementationLayoutRecord {
   };
 }
 
+// The proxy index says PROXY ran `implementation` as of block 42.
+async function indexAt(implementation: string, deployments = ["MyContract"]) {
+  await updateProxyEntry(storeDir(), {
+    format: 1,
+    proxy: PROXY,
+    chainId: 1,
+    implementation,
+    deployments,
+    observedAtBlock: 42,
+  });
+}
+
 let tmpDir: string;
 let deploymentsDir: string;
 const storeDir = () => join(deploymentsDir, ".storage-layouts");
@@ -57,9 +69,7 @@ const chain = () => makeMockChain({ implementations: { [PROXY]: LIVE } });
 function ctx(overrides: Partial<BaselineContext> = {}): BaselineContext {
   return {
     name: "MyContract",
-    // The deployment file already names the newer implementation: the
-    // queued-upgrade state, where file and chain disagree.
-    deployment: { address: PROXY, implementation: NEWER },
+    deployment: { address: PROXY },
     deploymentsDir,
     networkName: "mainnet",
     mode: "auto",
@@ -122,19 +132,16 @@ describe("resolveBaseline", () => {
   });
 
   it("auto: never substitutes another implementation's record once the chain has named one", async () => {
-    // A record exists only for the newer, not-yet-active implementation.
+    // A record and a stale index entry exist only for the newer, not-yet-active implementation.
     await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    await indexAt(NEWER);
     vi.mocked(resolveImplementationLayout).mockRejectedValue(
       new BaselineUnavailableError(`No layout record for implementation ${LIVE}.`),
     );
     const err = await resolveBaseline(
       ctx({
         provider: chain(),
-        deployment: {
-          address: PROXY,
-          implementation: NEWER,
-          upgradeStorageLayout: fieldLayout as never,
-        },
+        deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never },
       }),
     ).catch((e: unknown) => e);
 
@@ -143,11 +150,17 @@ describe("resolveBaseline", () => {
     expect((err as Error).message).toMatch(/No other baseline is used/);
   });
 
-  it("auto: an unreachable RPC falls back to the offline record, with a warning", async () => {
+  it("auto: an unreachable RPC falls back to the indexed implementation's record, with a warning", async () => {
     await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    await indexAt(NEWER);
     const r = await resolveBaseline(ctx({ provider: makeDeadChain() }));
     expect(r.layout).toEqual(newerLayout);
-    expect(r.info.source).toBe("offline-record");
+    expect(r.info).toEqual({
+      source: "offline-record",
+      implementation: NEWER,
+      bytecodeMatch: "immutables-only",
+      observedAtBlock: 42,
+    });
     expect(r.warnings[0]).toMatchObject({ kind: "chain-baseline-unavailable" });
     expect(vi.mocked(resolveImplementationLayout)).not.toHaveBeenCalled();
   });
@@ -157,14 +170,42 @@ describe("resolveBaseline", () => {
       ...record(NEWER, newerLayout),
       bytecodeMatch: "metadata-only" as never,
     });
+    await indexAt(NEWER);
     await expect(resolveBaseline(ctx())).rejects.toThrow(BaselineIntegrityError);
   });
 
   it("auto: no provider means offline without a warning", async () => {
     await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    await indexAt(NEWER);
     const r = await resolveBaseline(ctx());
     expect(r.info.source).toBe("offline-record");
     expect(r.warnings).toEqual([]);
+  });
+
+  it("offline: ignores records the index does not point at", async () => {
+    // Deployed but never activated (a discarded multisig upgrade): never read.
+    await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    await writeLayoutRecord(storeDir(), record(LIVE, liveLayout));
+    await indexAt(LIVE);
+    const r = await resolveBaseline(ctx());
+    expect(r.layout).toEqual(liveLayout);
+  });
+
+  it("offline: an indexed implementation without a record yields no baseline, not the deprecated field", async () => {
+    await indexAt(LIVE);
+    const r = await resolveBaseline(
+      ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
+    );
+    expect(r.layout).toBeUndefined();
+    expect(r.info.source).toBe("none");
+  });
+
+  it("offline: an index entry for other deployments at the address does not apply", async () => {
+    // e.g. this file describes the proxy contract itself.
+    await writeLayoutRecord(storeDir(), record(LIVE, liveLayout));
+    await indexAt(LIVE, ["OtherName"]);
+    const r = await resolveBaseline(ctx());
+    expect(r.layout).toBeUndefined();
   });
 
   it("auto: with no proxy slot on-chain, falls back to the deprecated field, flagged", async () => {
@@ -184,6 +225,7 @@ describe("resolveBaseline", () => {
 
   it("auto: never falls back on an integrity failure", async () => {
     await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    await indexAt(NEWER);
     vi.mocked(resolveImplementationLayout).mockRejectedValue(
       new BaselineIntegrityError("does not compile to the deployed code"),
     );
@@ -194,6 +236,7 @@ describe("resolveBaseline", () => {
 
   it("chain: refuses to fall back when the chain is unavailable", async () => {
     await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    await indexAt(NEWER);
     await expect(
       resolveBaseline(ctx({ mode: "chain", provider: makeDeadChain() })),
     ).rejects.toThrow(BaselineUnavailableError);

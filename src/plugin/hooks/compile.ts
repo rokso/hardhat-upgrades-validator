@@ -1,10 +1,10 @@
 /**
  * Hardhat v3 `solidity.build` hook handler.
  *
- * After a successful compilation pass, scans every network directory under
- * `deployments/` for contracts that have a saved `upgradeStorageLayout`
- * baseline. For each such contract, retrieves the freshly compiled layout and
- * runs storage upgrade validation. Any errors cause `process.exitCode = 1`.
+ * After a successful compilation pass, validates every proxy deployment the
+ * proxy index (or a deprecated `upgradeStorageLayout` field) knows about, in
+ * every network directory under `deployments/`, against the freshly compiled
+ * layout. Offline only. Any errors cause `process.exitCode = 1`.
  *
  * Also hooks `invokeSolc` to perform a second "namespaced" compilation pass
  * (same approach as @openzeppelin/hardhat-upgrades) so that types used only
@@ -48,12 +48,12 @@ import {
 } from "../../core/validator.js";
 import {
   readDeployment,
-  listDeployedProxies,
   getContractBuildData,
   createBuildInfoOutputCache,
   resolveArtifactName,
 } from "../internals/deployment-utils.js";
 import { resolveBaseline } from "../internals/baseline.js";
+import { listProxyDeployments } from "../internals/proxy-discovery.js";
 import { listSubdirsOrEmpty } from "../../utils/io.js";
 import { logger } from "../../utils/logger.js";
 
@@ -277,7 +277,14 @@ async function runAutoValidation(
 
   for (const network of networkDirs) {
     const deploymentsDir = resolve(deploymentsBase, network);
-    const contractNames = await listDeployedProxies(deploymentsDir);
+    let contractNames: string[];
+    try {
+      contractNames = await listProxyDeployments(deploymentsDir);
+    } catch (err) {
+      logger.error(`Could not read the proxy index for "${network}": ${(err as Error).message}`);
+      anyErrors = true;
+      continue;
+    }
 
     for (const name of contractNames) {
       const deployment = await readDeployment(deploymentsDir, name);
@@ -285,7 +292,7 @@ async function runAutoValidation(
       if (!deployment) continue;
 
       // Compiling must not need an RPC or explorer, so this is always offline:
-      // the stored record for the deployment file's implementation, else the
+      // the record for the implementation the proxy index names, else the
       // deprecated field. validate-upgrade and assertProxyUpgrade read the chain.
       let baseline;
       try {

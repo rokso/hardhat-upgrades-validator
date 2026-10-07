@@ -164,7 +164,7 @@ describe("chain baseline end to end", () => {
     ]);
 
     const onDisk = JSON.parse(
-      await readFile(join(tmpDir, ".storage-layouts", `${IMPL}.json`), "utf8"),
+      await readFile(join(tmpDir, ".storage-layouts", "implementations", `${IMPL}.json`), "utf8"),
     );
     expect(onDisk.layout).toEqual(first.record.layout);
 

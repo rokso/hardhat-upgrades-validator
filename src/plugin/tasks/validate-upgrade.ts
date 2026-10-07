@@ -16,18 +16,22 @@ import {
 } from "../../types/validation.js";
 import {
   readDeployment,
-  listDeployedProxies,
   getContractBuildData,
   createBuildInfoOutputCache,
   type BuildInfoOutputCache,
   type ProxyKind,
   resolveArtifactName,
   resolveDeploymentNetworks,
+  type DeploymentFile,
 } from "../internals/deployment-utils.js";
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
-import { resolveBaseline } from "../internals/baseline.js";
+import { probe, resolveBaseline } from "../internals/baseline.js";
+import {
+  classifyDeployment,
+  isIndexedLogic,
+  listProxyDeployments,
+} from "../internals/proxy-discovery.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
-import { detectProxy, detectProxyOnchain } from "../../core/proxy-detection.js";
 import type { EthProvider } from "../../core/onchain/types.js";
 import { logger } from "../../utils/logger.js";
 
@@ -95,18 +99,35 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
 
   for (const networkName of targetNetworks) {
     const deploymentsDir = resolve(deploymentsBase, networkName);
-    const contractNames = all ? await listDeployedProxies(deploymentsDir) : [contract!];
 
-    if (contractNames.length === 0) {
-      logger.log(`[INFO] No deployments found in ${deploymentsDir}`);
-      continue;
-    }
-
-    // Opened in every mode: proxy detection can fall back to the on-chain
-    // slots even when the baseline itself comes from the deployment file.
+    // Opened in every mode: which deployments are proxies comes from the
+    // chain when it is reachable, even when the baseline does not.
     const networkConnection = await hre.network.connect(networkName).catch(() => undefined);
 
     try {
+      const provider = networkConnection?.provider;
+      // Undefined means "decide from the proxy index and deployment files".
+      const chain =
+        opts.baseline !== "deployment" && provider !== undefined && (await isReachable(provider))
+          ? provider
+          : undefined;
+
+      let contractNames: string[];
+      try {
+        contractNames = all ? await listProxyDeployments(deploymentsDir, chain) : [contract!];
+      } catch (e) {
+        logger.log(
+          `  [ERROR] "${networkName}": could not discover proxies: ${(e as Error).message}`,
+        );
+        hasErrors = true;
+        continue;
+      }
+
+      if (contractNames.length === 0) {
+        logger.log(`[INFO] No proxy deployments found in ${deploymentsDir}`);
+        continue;
+      }
+
       for (const name of contractNames) {
         let result: ValidationResult | null;
         try {
@@ -117,7 +138,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
             hre,
             cache,
             validations,
-            networkConnection?.provider,
+            { provider, chain, discovered: all },
             opts,
           );
         } catch (e) {
@@ -148,6 +169,22 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
 
 export default action;
 
+async function isReachable(provider: EthProvider): Promise<boolean> {
+  return probe(provider).then(
+    () => true,
+    () => false,
+  );
+}
+
+interface ChainAccess {
+  /** The network's provider, reachable or not; resolveBaseline decides what to do with it. */
+  provider: EthProvider | undefined;
+  /** Set only when reachable and the mode reads the chain. */
+  chain: EthProvider | undefined;
+  /** The name came from proxy discovery, so it is already known to be a proxy's code. */
+  discovered: boolean;
+}
+
 async function validateContract(
   name: string,
   networkName: string,
@@ -155,23 +192,15 @@ async function validateContract(
   hre: HardhatRuntimeEnvironment,
   cache: BuildInfoOutputCache,
   validations: ValidationDataCurrent | undefined,
-  provider: EthProvider | undefined,
+  access: ChainAccess,
   opts: RunOptions,
 ): Promise<ValidationResult | null> {
   const deployment = await readDeployment(deploymentsDir, name);
 
-  if (deployment !== null) {
-    let isProxy = detectProxy(deployment).isProxy;
-
-    if (!isProxy && deployment.address && provider) {
-      const onchain = await detectProxyOnchain(provider, deployment.address);
-      isProxy = onchain.isProxy;
-    }
-
-    if (!isProxy) {
-      logger.log(
-        `  [SKIP] "${name}" — not detected as a proxy (checked deployment record, bytecode patterns, and on-chain EIP-1967 slots). Storage layout validation only applies to upgradeable proxy contracts.`,
-      );
+  if (deployment !== null && !access.discovered) {
+    const skip = await whyNotProxyCode(name, deployment, deploymentsDir, access.chain);
+    if (skip !== undefined) {
+      logger.log(`  [SKIP] "${name}": ${skip}`);
       return null;
     }
   }
@@ -182,7 +211,7 @@ async function validateContract(
     deploymentsDir,
     networkName,
     mode: opts.baseline,
-    provider,
+    provider: access.provider,
     config: hre.config.upgradesValidator,
   });
 
@@ -248,4 +277,26 @@ async function validateContract(
   result.baseline = baseline.info;
   result.warnings.push(...baseline.warnings);
   return result;
+}
+
+// Undefined when `name` describes the code behind a proxy; otherwise why not.
+async function whyNotProxyCode(
+  name: string,
+  deployment: DeploymentFile,
+  deploymentsDir: string,
+  chain: EthProvider | undefined,
+): Promise<string | undefined> {
+  if (chain !== undefined) {
+    const { role } = await classifyDeployment(chain, deployment);
+    if (role === "not-proxy") {
+      return "not a proxy on this chain (no ERC-1967 implementation or beacon slot).";
+    }
+    if (role === "proxy-contract") {
+      return "describes the proxy contract itself; validate the deployment that describes the code behind it.";
+    }
+    return undefined;
+  }
+  if (deployment.upgradeStorageLayout !== undefined) return undefined;
+  if (await isIndexedLogic(deploymentsDir, name, deployment)) return undefined;
+  return "not known as a proxy's code offline. Run with a reachable network, or record-baseline.";
 }

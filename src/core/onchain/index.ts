@@ -21,7 +21,15 @@ export {
   type ExplorerConfig,
   type VerifiedSource,
 } from "./explorer.js";
-export { readImplementation, readCode, readChainId, codeSha256 } from "./implementation.js";
+export {
+  readProxy,
+  readImplementation,
+  readCode,
+  readChainId,
+  readBlockNumber,
+  codeSha256,
+  type ProxyState,
+} from "./implementation.js";
 export { reconstructLayout, layoutFromSource, type ReconstructedLayout } from "./reconstruct.js";
 export { getSolc, type SolcOptions, type SolcRunner } from "./solc.js";
 export {
@@ -29,8 +37,11 @@ export {
   layoutStoreDir,
   readLayoutRecord,
   writeLayoutRecord,
+  readProxyEntry,
+  listProxyEntries,
+  updateProxyEntry,
 } from "./store.js";
-export type { EthProvider, ImplementationLayoutRecord } from "./types.js";
+export type { EthProvider, ImplementationLayoutRecord, ProxyIndexEntry } from "./types.js";
 export {
   compareDeployedBytecode,
   isProvingMatch,

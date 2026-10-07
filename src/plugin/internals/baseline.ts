@@ -14,7 +14,7 @@ import { resolveImplementationLayout } from "../../core/onchain/baseline.js";
 import { ETHERSCAN_V2_API_URL } from "../../core/onchain/explorer.js";
 import { readImplementation } from "../../core/onchain/implementation.js";
 import { BaselineUnavailableError } from "../../core/onchain/errors.js";
-import { layoutStoreDir, readLayoutRecord } from "../../core/onchain/store.js";
+import { layoutStoreDir, readLayoutRecord, readProxyEntry } from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
 import type { UpgradesValidatorConfig } from "../../types/hardhat-type-extensions.js";
 import type { BaselineInfo, BaselineMode, ValidationWarning } from "../../types/validation.js";
@@ -126,28 +126,31 @@ export async function probe(provider: EthProvider): Promise<void> {
   }
 }
 
-// Offline: the record for the implementation the deployment file names, else
-// the deprecated deployment-file layout.
+// Offline: the record for the implementation the proxy index says the proxy
+// ran when last observed. Without an index entry, the deprecated field. With
+// an entry but no record, nothing: another layout would describe other code.
 async function offlineBaseline(
   ctx: BaselineContext,
   warnings: ValidationWarning[],
 ): Promise<ResolvedBaseline> {
-  const implementation = ctx.deployment?.implementation;
-  if (implementation !== undefined) {
-    const record = await readLayoutRecord(layoutStoreDir(ctx.deploymentsDir), implementation);
-    if (record !== undefined) {
-      return {
-        layout: record.layout,
-        info: {
-          source: "offline-record",
-          implementation: record.address,
-          bytecodeMatch: record.bytecodeMatch,
-        },
-        warnings,
-      };
-    }
+  const address = ctx.deployment?.address;
+  const storeDir = layoutStoreDir(ctx.deploymentsDir);
+  const entry = address !== undefined ? await readProxyEntry(storeDir, address) : undefined;
+  if (entry === undefined || !entry.deployments.includes(ctx.name)) {
+    return deploymentFileBaseline(ctx, warnings);
   }
-  return deploymentFileBaseline(ctx, warnings);
+  const record = await readLayoutRecord(storeDir, entry.implementation);
+  if (record === undefined) return { layout: undefined, info: { source: "none" }, warnings };
+  return {
+    layout: record.layout,
+    info: {
+      source: "offline-record",
+      implementation: record.address,
+      bytecodeMatch: record.bytecodeMatch,
+      observedAtBlock: entry.observedAtBlock,
+    },
+    warnings,
+  };
 }
 
 function deploymentFileBaseline(

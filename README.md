@@ -71,16 +71,26 @@ The "before" layout is the layout of the implementation the proxy **runs right n
 For each proxy, the plugin:
 
 1. Reads the implementation from the proxy's ERC-1967 slot (or its beacon).
-2. Looks up a layout record for that implementation address under `deployments/<network>/.storage-layouts/`.
+2. Looks up a layout record for that implementation address under `deployments/<network>/.storage-layouts/implementations/`.
 3. If there is none, rebuilds it: fetches the implementation's verified source from an Etherscan-compatible explorer, compiles it with the exact solc version, **proves** the result matches the deployed code (immutables masked), extracts the layout with the same oz-core pipeline the local build uses, and records it.
 
 Deployed code never changes, so a record keyed by implementation address cannot go stale, and one record serves every proxy that shares the implementation.
 
-| Mode (`--baseline` / `baseline`) | Old layout                                                                                                                                                                                                                                                    |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto` (default)                 | The chain when reachable. If the chain cannot say which implementation the proxy runs (no RPC, no proxy slot), the stored record for the implementation named in the deployment file, then the deprecated `upgradeStorageLayout` field, each labeled as such. |
-| `chain`                          | The chain only. Fails when it cannot supply a baseline.                                                                                                                                                                                                       |
-| `deployment`                     | The deprecated `upgradeStorageLayout` field only (0.1.0-alpha.1 behavior).                                                                                                                                                                                    |
+### Which deployments are proxies
+
+hardhat-deploy v2 records no implementation address, and its file names (`X`, `X_Proxy`, `X_Implementation`) are a convention, not something to trust. So proxies are found from the chain and file contents only:
+
+- A deployment is a proxy when the chain has an ERC-1967 implementation or beacon slot set at its address. A bare implementation or a plain contract has neither, and is skipped.
+- Several files can share a proxy address (hardhat-deploy v2 writes `X` and `X_Proxy` there). A file whose code is the code at that address describes the proxy contract itself and is skipped; the others describe the code behind the proxy, and their artifact is the new side of the comparison.
+- A proxy whose only file describes the proxy contract itself is reported, not validated: nothing names its new code.
+
+Runs that can reach the chain (`validate-upgrade --all`, `record-baseline`, the deploy hook) keep a **proxy index** under `.storage-layouts/proxies/`: which implementation each proxy ran when last observed, and which deployments describe its code. Offline runs read it. It is written only from what the chain reports, so a queued or discarded upgrade never moves it; it goes stale when a proxy is upgraded outside these runs, until the next run with an RPC, and offline results name the block it was observed at.
+
+| Mode (`--baseline` / `baseline`) | Old layout                                                                                                                                                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `auto` (default)                 | The chain when reachable. If the chain cannot say which implementation the proxy runs (no RPC, no proxy slot), the stored record for the implementation the proxy index names, else the deprecated `upgradeStorageLayout` field, each labeled as such. |
+| `chain`                          | The chain only. Fails when it cannot supply a baseline.                                                                                                                                                                                                |
+| `deployment`                     | The deprecated `upgradeStorageLayout` field only (0.1.0-alpha.1 behavior).                                                                                                                                                                             |
 
 `auto` falls back only while the chain **cannot say which implementation the proxy runs**. Once it has named one, only that implementation's layout is acceptable: if no record exists and it cannot be rebuilt (no explorer configured, unverified source, explorer or compiler download unreachable), validation fails rather than compare against another implementation's layout. Untrustworthy answers fail too, such as verified source that does not compile to the deployed code. A match only after stripping metadata is not accepted as proof: variables no code reads, gap sizes and field names never reach the bytecode, so two layouts can share the same code. Every result names its baseline:
 
@@ -89,7 +99,7 @@ Deployed code never changes, so a record keyed by implementation address cannot 
          baseline: chain, implementation 0x5fbd… (immutables-only, stored record)
 ```
 
-The compile hook always runs offline (compiling must not need an RPC), so it uses stored records. `validate-upgrade` and the proxy helpers read the chain, and may write records under `deployments/<network>/.storage-layouts/` and download a compiler the first time they rebuild a layout.
+The compile hook always runs offline (compiling must not need an RPC), so it validates the proxies the proxy index lists, against stored records. An indexed implementation with no record is skipped, never replaced by the deprecated field. `validate-upgrade` and the proxy helpers read the chain, and may write under `deployments/<network>/.storage-layouts/` and download a compiler the first time they rebuild a layout.
 
 Hardhat 3 gives every `network.connect()` to an in-process (EDR) network a fresh chain. In a deploy script running on such a network, pass the script's own provider (`assertProxyUpgrade(hre, "MyToken", { provider })`) so validation sees the same chain; the deploy hook cannot, and skips recording there.
 
@@ -132,7 +142,7 @@ export default deployScript(
 );
 ```
 
-After the deploy, the deploy hook records the new implementation's layout under `deployments/<network>/.storage-layouts/`, once it has proven the chain runs the local build.
+After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read.
 
 ### Standard upgrade
 
@@ -235,7 +245,7 @@ Only standard-json verifications can be rebuilt: flattened and multi-file verifi
 
 ### `record-baseline`
 
-Records the layout of the implementation each proxy runs on-chain, keyed by implementation address under `deployments/<network>/.storage-layouts/`. Optional: validation records layouts on demand. Use it to record up front, for review in a PR or for CI without an explorer key. Needs an RPC for the network.
+Records the layout of the implementation each proxy runs on-chain, keyed by implementation address under `deployments/<network>/.storage-layouts/`, and refreshes the proxy index. Optional: validation records layouts on demand. Use it to record up front, for review in a PR or for CI without an explorer key. Needs an RPC for the network.
 
 ```sh
 npx hardhat record-baseline --all --network mainnet
@@ -246,7 +256,7 @@ npx hardhat record-baseline --all --network mainnet --force   # overwrite existi
 | Flag                | Description                                                                         |
 | ------------------- | ----------------------------------------------------------------------------------- |
 | `--contract <name>` | Record a single proxy                                                               |
-| `--all`             | Record every proxy deployment                                                       |
+| `--all`             | Record every proxy found on the chain                                               |
 | `--network <name>`  | Restrict to one network directory under `deployments/`                              |
 | `--from-chain`      | Rebuild the layout from the implementation's verified source instead of local build |
 | `--force`           | Overwrite existing records. Never skips the bytecode proof.                         |
@@ -255,7 +265,7 @@ Without `--from-chain`, the local build's layout is recorded only if the chain r
 
 ### `validate-upgrade`
 
-Compares all recorded baselines against the current compiled artifacts. Useful in CI after a compile step and before deploying.
+Compares the layout each proxy runs against the current compiled artifacts. Useful in CI after a compile step and before deploying.
 
 ```sh
 npx hardhat validate-upgrade --all
@@ -267,7 +277,7 @@ npx hardhat validate-upgrade --all --unsafe-skip-storage-check   # emergency esc
 | Flag                          | Description                                            |
 | ----------------------------- | ------------------------------------------------------ |
 | `--contract <name>`           | Validate a single contract                             |
-| `--all`                       | Validate all contracts with a baseline                 |
+| `--all`                       | Validate every proxy (chain, else the proxy index)     |
 | `--network <name>`            | Restrict to one network directory under `deployments/` |
 | `--unsafe-allow <kinds>`      | Space/comma-separated list of checks to bypass         |
 | `--unsafe-skip-storage-check` | Skip all storage checks (emits a loud warning)         |
@@ -404,10 +414,18 @@ Valid `unsafe-allow` kinds: `constructor`, `delegatecall`, `selfdestruct`, `stat
 
 ## How baselines are stored
 
-One JSON file per implementation address, under `deployments/<network>/.storage-layouts/`. Commit them: they are reviewable in PRs and let CI validate without an explorer key. hardhat-deploy only loads `*.json` files directly inside the network directory, so the dot-directory is never read as a deployment.
+Under `deployments/<network>/.storage-layouts/`, one JSON file per address:
+
+```
+deployments/mainnet/.storage-layouts/
+  implementations/<implementation>.json   layout records
+  proxies/<proxy>.json                    the proxy index
+```
+
+Commit them: they are reviewable in PRs and let CI validate without an explorer key or an RPC. One file per address keeps unrelated upgrades from conflicting. hardhat-deploy only loads `*.json` files directly inside the network directory, so the dot-directory is never read as a deployment.
 
 ```jsonc
-// deployments/mainnet/.storage-layouts/0x5fbdb2315678afecb367f032d93f642f64180aa3.json
+// deployments/mainnet/.storage-layouts/implementations/0x5fbdb2315678afecb367f032d93f642f64180aa3.json
 {
   "format": 1,
   "address": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
@@ -419,6 +437,18 @@ One JSON file per implementation address, under `deployments/<network>/.storage-
   "source": "explorer", // explorer | local-compile
   "recordedAt": "2026-10-07T00:00:00.000Z",
   "layout": { "storage": [...], "types": {...}, "namespaces": {...} }
+}
+```
+
+```jsonc
+// deployments/mainnet/.storage-layouts/proxies/0xe7f1725e7734ce288f8367e1bb143e90bb3f0512.json
+{
+  "format": 1,
+  "proxy": "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+  "chainId": 1,
+  "implementation": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
+  "deployments": ["MyToken"], // the files describing the code behind the proxy
+  "observedAtBlock": 21000000, // rewritten only when the entry's content changes
 }
 ```
 
@@ -462,9 +492,9 @@ Existing `upgradeStorageLayout` fields are used only when the chain cannot say w
 
 Behavior changes:
 
-- The deploy hook and `record-baseline` write `.storage-layouts/` records instead of `upgradeStorageLayout`.
+- The deploy hook and `record-baseline` write `.storage-layouts/` records and the proxy index instead of `upgradeStorageLayout`.
 - `record-baseline` needs an RPC for the network, and `--force` no longer skips the bytecode check: it only allows overwriting an existing record.
-- `validate-upgrade --all` covers every proxy deployment (anything with an `implementation` field), not only those with a stamped baseline.
+- `validate-upgrade --all` covers every proxy found on the chain (or, offline, in the proxy index), not only those with a stamped baseline. An `implementation` field in a deployment file is ignored.
 
 ## License
 

@@ -395,7 +395,7 @@ function describeBaseline(b: BaselineInfo): string {
     case "chain":
       return `chain, implementation ${b.implementation} (${b.bytecodeMatch}, ${b.origin === "store" ? "stored record" : "rebuilt from explorer"})`;
     case "offline-record":
-      return `offline record for ${b.implementation} from the deployment file (${b.bytecodeMatch}); not checked against the chain`;
+      return `offline record for ${b.implementation}, the implementation as of block ${b.observedAtBlock} (${b.bytecodeMatch}); not checked against the chain`;
     case "deployment-file":
       return "deployment file upgradeStorageLayout (deprecated)";
     case "none":

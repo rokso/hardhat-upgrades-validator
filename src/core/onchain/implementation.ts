@@ -1,26 +1,55 @@
 import {
-  getImplementationAddressFromProxy,
+  EIP1967BeaconNotFound,
+  EIP1967ImplementationNotFound,
+  getBeaconAddress,
+  getImplementationAddress,
+  getImplementationAddressFromBeacon,
   type EthereumProvider,
 } from "@openzeppelin/upgrades-core";
 import { createHash } from "node:crypto";
-import type { EthProvider } from "../proxy-detection.js";
+import type { EthProvider } from "./types.js";
 import { BaselineUnavailableError } from "./errors.js";
 
+export interface ProxyState {
+  implementation: string;
+  /** Set for a beacon proxy; `implementation` is then the beacon's. */
+  beacon?: string;
+}
+
 /**
- * Reads the implementation a proxy runs right now: the ERC-1967
- * implementation slot, or the beacon's implementation for a beacon proxy.
+ * Reads what a proxy runs right now: the ERC-1967 implementation slot, or the
+ * beacon's implementation for a beacon proxy. Undefined when neither slot is
+ * set, i.e. the address is not a proxy this tool understands.
  */
+export async function readProxy(
+  provider: EthProvider,
+  address: string,
+): Promise<ProxyState | undefined> {
+  const oz = provider as unknown as EthereumProvider;
+  try {
+    return { implementation: (await getImplementationAddress(oz, address)).toLowerCase() };
+  } catch (e) {
+    if (!(e instanceof EIP1967ImplementationNotFound)) throw e;
+  }
+  let beacon: string;
+  try {
+    beacon = (await getBeaconAddress(oz, address)).toLowerCase();
+  } catch (e) {
+    if (e instanceof EIP1967BeaconNotFound) return undefined;
+    throw e;
+  }
+  const implementation = (await getImplementationAddressFromBeacon(oz, beacon)).toLowerCase();
+  return { implementation, beacon };
+}
+
 export async function readImplementation(provider: EthProvider, proxy: string): Promise<string> {
-  const impl = await getImplementationAddressFromProxy(
-    provider as unknown as EthereumProvider,
-    proxy,
-  );
-  if (impl === undefined) {
+  const state = await readProxy(provider, proxy);
+  if (state === undefined) {
     throw new BaselineUnavailableError(
       `${proxy} has no ERC-1967 implementation or beacon slot set on this chain.`,
     );
   }
-  return impl.toLowerCase();
+  return state.implementation;
 }
 
 export async function readCode(provider: EthProvider, address: string): Promise<string> {
@@ -33,6 +62,10 @@ export async function readCode(provider: EthProvider, address: string): Promise<
 
 export async function readChainId(provider: EthProvider): Promise<number> {
   return Number(BigInt((await provider.send("eth_chainId", [])) as string));
+}
+
+export async function readBlockNumber(provider: EthProvider): Promise<number> {
+  return Number(BigInt((await provider.send("eth_blockNumber", [])) as string));
 }
 
 export function codeSha256(code: string): string {

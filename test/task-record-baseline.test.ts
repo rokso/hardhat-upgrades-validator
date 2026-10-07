@@ -53,6 +53,8 @@ const COMPILED = "0x6080604052" + "00".repeat(32) + "fe";
 const IMMUTABLES = { "7": [{ start: 5, length: 32 }] };
 // The same code on-chain, immutable filled in.
 const DEPLOYED = "0x6080604052" + "ab".repeat(32) + "fe";
+// What runs at the proxy address: unrelated to the implementation's code.
+const PROXY_CODE = "0x60806040" + "cd".repeat(16);
 
 const testLayout = {
   storage: [
@@ -82,7 +84,7 @@ async function writeDeployment(name: string, data: Record<string, unknown>) {
 async function readRecord(address: string): Promise<Record<string, unknown> | undefined> {
   try {
     const raw = await readFile(
-      join(deploymentsDir, ".storage-layouts", `${address.toLowerCase()}.json`),
+      join(deploymentsDir, ".storage-layouts", "implementations", `${address.toLowerCase()}.json`),
       "utf8",
     );
     return JSON.parse(raw) as Record<string, unknown>;
@@ -144,7 +146,10 @@ afterEach(async () => {
 
 describe("local build", () => {
   it("records the live implementation's layout when the chain runs the local build", async () => {
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -160,7 +165,10 @@ describe("local build", () => {
   });
 
   it("never writes the deprecated upgradeStorageLayout field", async () => {
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -170,9 +178,12 @@ describe("local build", () => {
     expect(deployment.upgradeStorageLayout).toBeUndefined();
   });
 
-  it("keys the record by the chain's implementation, not the deployment file's", async () => {
+  it("ignores an implementation address in the deployment file; the chain decides", async () => {
     await writeDeployment("MyContract", { address: PROXY, implementation: STALE_IMPL });
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -182,7 +193,10 @@ describe("local build", () => {
 
   it("refuses to record when the chain runs different code, and points at --from-chain", async () => {
     const other = "0x6080604052" + "ab".repeat(32) + "ff";
-    const chain = makeMockChain({ code: { [IMPL]: other }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: other },
+      implementations: { [PROXY]: IMPL },
+    });
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -194,7 +208,10 @@ describe("local build", () => {
     // Same code, different CBOR metadata tail (0xa2 map marker, other hash bytes).
     const compiled = "0x6080604052" + "00".repeat(32) + "fe" + "a2" + "11".repeat(9) + "000a";
     const deployed = "0x6080604052" + "ab".repeat(32) + "fe" + "a2" + "22".repeat(9) + "000a";
-    const chain = makeMockChain({ code: { [IMPL]: deployed }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: deployed },
+      implementations: { [PROXY]: IMPL },
+    });
     const hre = makeHre(chain);
     hre.artifacts.readArtifact.mockResolvedValue({
       contractName: "MyContract",
@@ -211,7 +228,10 @@ describe("local build", () => {
 
   it("--force does not bypass the bytecode proof", async () => {
     const other = "0x6080604052" + "ab".repeat(32) + "ff";
-    const chain = makeMockChain({ code: { [IMPL]: other }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: other },
+      implementations: { [PROXY]: IMPL },
+    });
 
     await recordBaselineAction({ ...baseArgs, force: true }, makeHre(chain) as never);
 
@@ -219,7 +239,10 @@ describe("local build", () => {
   });
 
   it("skips when the artifact is not found", async () => {
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
     vi.mocked(getContractBuildData).mockRejectedValue(new Error("artifact not found"));
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
@@ -230,12 +253,75 @@ describe("local build", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Proxy index and discovery
+// ---------------------------------------------------------------------------
+
+describe("proxy index", () => {
+  it("indexes the proxy it recorded for", async () => {
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+      blockNumber: 55,
+    });
+
+    await recordBaselineAction(baseArgs, makeHre(chain) as never);
+
+    const entry = JSON.parse(
+      await readFile(join(deploymentsDir, ".storage-layouts", "proxies", `${PROXY}.json`), "utf8"),
+    );
+    expect(entry).toEqual({
+      format: 1,
+      proxy: PROXY,
+      chainId: 1,
+      implementation: IMPL,
+      deployments: ["MyContract"],
+      observedAtBlock: 55,
+    });
+  });
+
+  it("refuses the file describing the proxy contract itself, naming the right one", async () => {
+    await writeDeployment("MyContract_Proxy", { address: PROXY, deployedBytecode: PROXY_CODE });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+
+    await recordBaselineAction(
+      { ...baseArgs, contract: "MyContract_Proxy" },
+      makeHre(chain) as never,
+    );
+
+    expect(await readRecord(IMPL)).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/proxy contract itself.*\(MyContract\)/);
+  });
+
+  it("--all records once per proxy, skipping the proxy contract's file", async () => {
+    await writeDeployment("MyContract_Proxy", { address: PROXY, deployedBytecode: PROXY_CODE });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+
+    await recordBaselineAction(
+      { ...baseArgs, contract: undefined, all: true },
+      makeHre(chain) as never,
+    );
+
+    expect(await readRecord(IMPL)).toBeDefined();
+    expect(vi.mocked(getContractBuildData).mock.calls.map(([n]) => n)).toEqual(["MyContract"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Existing records
 // ---------------------------------------------------------------------------
 
 describe("existing record", () => {
   it("skips without --force and overwrites with --force", async () => {
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
     const first = await readRecord(IMPL);
 
@@ -273,7 +359,7 @@ describe("chain availability", () => {
   });
 
   it("skips a deployment that is not a proxy on this chain", async () => {
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED } });
+    const chain = makeMockChain({ code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED } });
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -288,7 +374,10 @@ describe("chain availability", () => {
 
 describe("--from-chain", () => {
   it("rebuilds from verified source with the configured explorer, refreshing on --force", async () => {
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
     vi.mocked(resolveImplementationLayout).mockResolvedValue({
       implementation: IMPL,
       origin: "explorer",
@@ -311,7 +400,10 @@ describe("--from-chain", () => {
 
   it("reports an explorer failure as an error without aborting other contracts", async () => {
     await writeDeployment("Other", { address: PROXY, implementation: IMPL });
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
     vi.mocked(resolveImplementationLayout)
       .mockRejectedValueOnce(new Error("Explorer rejected the request: Invalid API Key"))
       .mockResolvedValueOnce({
@@ -344,7 +436,10 @@ describe("network override", () => {
       JSON.stringify({ address: PROXY, implementation: IMPL }),
       "utf8",
     );
-    const chain = makeMockChain({ code: { [IMPL]: DEPLOYED }, implementations: { [PROXY]: IMPL } });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
     const hre = makeHre(chain);
 
     await recordBaselineAction({ ...baseArgs, network: "mainnet" }, hre as never);
@@ -352,7 +447,7 @@ describe("network override", () => {
     expect(hre.network.connect).toHaveBeenCalledWith("mainnet");
     expect(await readRecord(IMPL)).toBeUndefined(); // localhost untouched
     const mainnetRecord = await readFile(
-      join(mainnetDir, ".storage-layouts", `${IMPL}.json`),
+      join(mainnetDir, ".storage-layouts", "implementations", `${IMPL}.json`),
       "utf8",
     );
     expect(JSON.parse(mainnetRecord).address).toBe(IMPL);

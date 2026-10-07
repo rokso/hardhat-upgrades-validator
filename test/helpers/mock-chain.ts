@@ -1,6 +1,6 @@
 /**
  * In-memory JSON-RPC provider for the calls the chain-baseline code makes:
- * eth_chainId, eth_getCode, eth_getStorageAt on the ERC-1967 implementation
+ * eth_chainId, eth_blockNumber, eth_getCode, eth_getStorageAt on the ERC-1967 implementation
  * and beacon slots, and eth_call of a beacon's implementation() (all reached
  * through oz-core's getImplementationAddressFromProxy).
  */
@@ -13,6 +13,7 @@ const ZERO_WORD = "0x" + "0".repeat(64);
 
 export interface MockChainState {
   chainId?: number;
+  blockNumber?: number;
   /** address → runtime code */
   code?: Record<string, string>;
   /** proxy address → implementation address (ERC-1967 implementation slot) */
@@ -32,6 +33,8 @@ export function makeMockChain(state: MockChainState = {}) {
     switch (method) {
       case "eth_chainId":
         return "0x" + (state.chainId ?? 1).toString(16);
+      case "eth_blockNumber":
+        return "0x" + (state.blockNumber ?? 100).toString(16);
       case "eth_getCode":
         return code[String(params[0]).toLowerCase()] ?? "0x";
       case "eth_getStorageAt": {

@@ -2,7 +2,8 @@
  * `record-baseline` task action.
  *
  * Writes a layout record for the implementation each proxy runs right now,
- * keyed by implementation address under `deployments/<network>/.storage-layouts/`.
+ * keyed by implementation address under `deployments/<network>/.storage-layouts/`,
+ * and refreshes the proxy index offline runs read.
  *
  * - Default: the local build's layout, recorded only if the chain runs exactly
  *   that build (immutables masked).
@@ -20,19 +21,22 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 import { resolve } from "node:path";
 
 import {
-  readDeployment,
   getContractBuildData,
   createBuildInfoOutputCache,
-  listDeployedProxies,
+  readDeployments,
   resolveArtifactName,
   resolveDeploymentNetworks,
+  type DeploymentFile,
 } from "../internals/deployment-utils.js";
+import {
+  discoverProxies,
+  updateProxyIndex,
+  type DiscoveredProxy,
+} from "../internals/proxy-discovery.js";
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
 import { explorerConfig, probe } from "../internals/baseline.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import { recordLocalBuild, resolveImplementationLayout } from "../../core/onchain/baseline.js";
-import { BaselineUnavailableError } from "../../core/onchain/errors.js";
-import { readImplementation } from "../../core/onchain/implementation.js";
 import { layoutStoreDir, readLayoutRecord } from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
 import type { ImmutableReferences } from "../../core/bytecode-utils.js";
@@ -71,9 +75,8 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
 
   for (const networkName of targetNetworks) {
     const deploymentsDir = resolve(deploymentsBase, networkName);
-    const contractNames = all ? await listDeployedProxies(deploymentsDir) : [contract!];
-
-    if (contractNames.length === 0) {
+    const deployments = await readDeployments(deploymentsDir);
+    if (deployments.size === 0) {
       logger.log(`[INFO] No deployments found in ${deploymentsDir}`);
       continue;
     }
@@ -92,20 +95,40 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
         `[SKIP] Network "${networkName}": no reachable RPC. record-baseline reads the live implementation, so it needs one.`,
       );
       await connection?.close().catch(() => {});
-      totalSkipped += contractNames.length;
+      totalSkipped += all ? deployments.size : 1;
       continue;
     }
 
     try {
-      for (const name of contractNames) {
+      let found: Targets;
+      try {
+        found = await findTargets(provider!, deployments, all ? undefined : contract!);
+      } catch (e) {
+        logger.log(
+          `  [ERROR] "${networkName}": could not discover proxies: ${(e as Error).message}`,
+        );
+        anyFailed = true;
+        continue;
+      }
+      await updateProxyIndex(deploymentsDir, provider!, found.discovered);
+      const { targets } = found;
+      if (targets.length === 0) {
+        if (all) logger.log(`[INFO] No proxy deployments found in ${deploymentsDir}`);
+        else totalSkipped++;
+        continue;
+      }
+
+      for (const [name, proxy] of targets) {
         try {
-          const outcome = await recordBaseline(name, deploymentsDir, networkName, hre, {
-            provider: provider!,
-            cache,
-            validations,
-            force,
-            fromChain,
-          });
+          const outcome = await recordBaseline(
+            name,
+            deployments.get(name)!,
+            proxy.implementation,
+            deploymentsDir,
+            networkName,
+            hre,
+            { provider: provider!, cache, validations, force, fromChain },
+          );
           if (outcome === "recorded") totalRecorded++;
           else totalSkipped++;
         } catch (e) {
@@ -126,8 +149,52 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
 
 export default action;
 
+interface Targets {
+  /** Every proxy found, for the index. */
+  discovered: DiscoveredProxy[];
+  /** (deployment name, its proxy) pairs to record. */
+  targets: Array<[string, DiscoveredProxy]>;
+}
+
+// For a single contract, logs why it is skipped when it is not the code behind a proxy.
+async function findTargets(
+  provider: EthProvider,
+  deployments: Map<string, DeploymentFile>,
+  contract: string | undefined,
+): Promise<Targets> {
+  if (contract === undefined) {
+    const discovered = await discoverProxies(provider, deployments);
+    const targets = discovered.flatMap((p) =>
+      p.deployments.map((n): [string, DiscoveredProxy] => [n, p]),
+    );
+    return { discovered, targets };
+  }
+  const address = deployments.get(contract)?.address?.toLowerCase();
+  if (address === undefined) {
+    logger.log(`  [SKIP] "${contract}": no deployment file with an address.`);
+    return { discovered: [], targets: [] };
+  }
+  const discovered = await discoverProxies(provider, deployments, new Set([address]));
+  const [proxy] = discovered;
+  if (proxy === undefined) {
+    logger.log(
+      `  [SKIP] "${contract}": ${address} has no ERC-1967 implementation or beacon slot set on this chain.`,
+    );
+    return { discovered, targets: [] };
+  }
+  if (!proxy.deployments.includes(contract)) {
+    logger.log(
+      `  [SKIP] "${contract}": describes the proxy contract itself; record the deployment that describes the code behind it (${proxy.deployments.join(", ")}).`,
+    );
+    return { discovered, targets: [] };
+  }
+  return { discovered, targets: [[contract, proxy]] };
+}
+
 async function recordBaseline(
   name: string,
+  deployment: DeploymentFile,
+  implementation: string,
   deploymentsDir: string,
   networkName: string,
   hre: HardhatRuntimeEnvironment,
@@ -139,21 +206,6 @@ async function recordBaseline(
     fromChain: boolean;
   },
 ): Promise<Outcome> {
-  const deployment = await readDeployment(deploymentsDir, name);
-  if (deployment?.address === undefined) {
-    logger.log(`  [SKIP] "${name}": no deployment file with an address.`);
-    return "skipped";
-  }
-
-  let implementation: string;
-  try {
-    implementation = await readImplementation(ctx.provider, deployment.address);
-  } catch (e) {
-    if (!(e instanceof BaselineUnavailableError)) throw e;
-    logger.log(`  [SKIP] "${name}": ${e.message}`);
-    return "skipped";
-  }
-
   const storeDir = layoutStoreDir(deploymentsDir);
   if (!ctx.force && (await readLayoutRecord(storeDir, implementation)) !== undefined) {
     logger.log(`  [SKIP] "${name}": implementation ${implementation} already recorded.`);
