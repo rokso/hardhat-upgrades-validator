@@ -1,10 +1,9 @@
 /**
- * Unit tests for the deploy hook's upgradeStorageLayout stamping behavior.
+ * Unit tests for the deploy hook's implementation-layout recording.
  *
- * Cases:
- *  - stamps upgradeStorageLayout when artifact bytecode matches deployment
- *  - skips when artifact bytecode does not match
- *  - skips when the artifact is not found (getContractBuildData throws)
+ * After a deploy, the hook writes an address-keyed record for every
+ * implementation a proxy deployment points at, but only when the chain runs
+ * the local build. It never writes the deprecated upgradeStorageLayout field.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
@@ -29,28 +28,24 @@ vi.mock("../src/plugin/hooks/compile.js", () => ({
   getInMemoryValidations: vi.fn().mockReturnValue(null),
 }));
 
-vi.mock("../src/plugin/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", () => ({
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
 import deployOverride from "../src/plugin/hooks/deploy.js";
 import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 
 // ---------------------------------------------------------------------------
-// Bytecode helpers
+// Fixtures
 // ---------------------------------------------------------------------------
 
-function makeBytecode(coreHex: string, cborLength: number): string {
-  const core = Buffer.from(coreHex, "hex");
-  const cbor = Buffer.alloc(cborLength, 0xaa);
-  const lenBuf = Buffer.alloc(2);
-  lenBuf.writeUInt16BE(cborLength, 0);
-  return "0x" + Buffer.concat([core, cbor, lenBuf]).toString("hex");
-}
+const PROXY = "0x00000000000000000000000000000000000000aa";
+const IMPL = "0x00000000000000000000000000000000000000bb";
 
-// ---------------------------------------------------------------------------
-// Test fixtures
-// ---------------------------------------------------------------------------
+const COMPILED = "0x6080604052" + "00".repeat(32) + "fe";
+const IMMUTABLES = { "7": [{ start: 5, length: 32 }] };
+const DEPLOYED = "0x6080604052" + "ab".repeat(32) + "fe";
 
 const testLayout = {
   storage: [
@@ -73,26 +68,48 @@ const testLayout = {
 let tmpDir: string;
 let deploymentsDir: string;
 
-async function writeDeployment(name: string, data: Record<string, unknown>) {
-  await writeFile(join(deploymentsDir, `${name}.json`), JSON.stringify(data, null, 2), "utf8");
+async function writeDeployment(dir: string, name: string, data: Record<string, unknown>) {
+  await writeFile(join(dir, `${name}.json`), JSON.stringify(data, null, 2), "utf8");
 }
 
-async function readDeploymentFile(name: string): Promise<Record<string, unknown>> {
-  const raw = await readFile(join(deploymentsDir, `${name}.json`), "utf8");
-  return JSON.parse(raw) as Record<string, unknown>;
+async function readRecord(dir: string, address: string) {
+  try {
+    return JSON.parse(
+      await readFile(join(dir, ".storage-layouts", `${address}.json`), "utf8"),
+    ) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
-function makeHre(artifactBytecode: string) {
+function makeHre(provider: { send: unknown } | undefined) {
   return {
     globalOptions: { network: "localhost" },
     config: { paths: { root: tmpDir, cache: join(tmpDir, "cache") } },
     artifacts: {
-      readArtifact: vi.fn().mockResolvedValue({ deployedBytecode: artifactBytecode }),
+      readArtifact: vi.fn().mockResolvedValue({
+        contractName: "MyContract",
+        sourceName: "contracts/MyContract.sol",
+        deployedBytecode: COMPILED,
+        immutableReferences: IMMUTABLES,
+      }),
       getBuildInfoId: vi.fn().mockResolvedValue(undefined),
       getBuildInfoOutputPath: vi.fn().mockResolvedValue(undefined),
     },
+    network: {
+      connect: vi
+        .fn()
+        .mockImplementation(() =>
+          provider === undefined
+            ? Promise.reject(new Error("no network"))
+            : Promise.resolve({ provider, close: vi.fn().mockResolvedValue(undefined) }),
+        ),
+    },
   };
 }
+
+const liveChain = () => makeMockChain({ code: { [IMPL]: DEPLOYED } });
+const runSuper = () => vi.fn().mockResolvedValue("deploy-result");
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-deploytest-"));
@@ -102,9 +119,17 @@ beforeEach(async () => {
   vi.mocked(getContractBuildData).mockResolvedValue({
     upgradeStorageLayout: testLayout,
   } as never);
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  await writeDeployment(deploymentsDir, "MyContract", { address: PROXY, implementation: IMPL });
+  await writeDeployment(deploymentsDir, "MyContract_Implementation", {
+    address: IMPL,
+    deployedBytecode: COMPILED,
+  });
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await rm(tmpDir, { recursive: true });
 });
 
@@ -112,140 +137,85 @@ afterEach(async () => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("upgradeStorageLayout stamping", () => {
-  it("stamps upgradeStorageLayout when artifact bytecode matches deployment", async () => {
-    const bytecode = makeBytecode("60806040", 10);
-    await writeDeployment("MyContract", {
-      address: "0x1",
-      deployedBytecode: bytecode,
+describe("implementation layout recording", () => {
+  it("records a freshly deployed implementation once the chain runs it", async () => {
+    const result = await deployOverride({}, makeHre(liveChain()) as never, runSuper());
+
+    expect(result).toBe("deploy-result");
+    expect(await readRecord(deploymentsDir, IMPL)).toMatchObject({
+      address: IMPL,
+      bytecodeMatch: "immutables-only",
+      source: "local-compile",
+      contract: "contracts/MyContract.sol:MyContract",
+      layout: testLayout,
     });
-    const hre = makeHre(bytecode);
-
-    await deployOverride(
-      { network: "localhost" },
-      hre as never,
-      vi.fn().mockResolvedValue(undefined),
-    );
-
-    const result = await readDeploymentFile("MyContract");
-    expect(result.upgradeStorageLayout).toEqual(testLayout);
   });
 
-  it("stamps when bytecodes match with metadata-only diff", async () => {
-    const coreHex = "60806040";
-    const deployedBytecode = makeBytecode(coreHex, 10);
-    const coreBuf = Buffer.from(coreHex, "hex");
-    const cborBuf = Buffer.alloc(10, 0xbb); // different CBOR fill
-    const lenBuf = Buffer.alloc(2);
-    lenBuf.writeUInt16BE(10, 0);
-    const artifactBytecode = "0x" + Buffer.concat([coreBuf, cborBuf, lenBuf]).toString("hex");
+  it("never writes the deprecated upgradeStorageLayout field", async () => {
+    await deployOverride({}, makeHre(liveChain()) as never, runSuper());
 
-    await writeDeployment("MyContract", { address: "0x1", deployedBytecode });
-    const hre = makeHre(artifactBytecode);
-
-    await deployOverride(
-      { network: "localhost" },
-      hre as never,
-      vi.fn().mockResolvedValue(undefined),
-    );
-
-    const result = await readDeploymentFile("MyContract");
-    expect(result.upgradeStorageLayout).toEqual(testLayout);
+    for (const name of ["MyContract", "MyContract_Implementation"]) {
+      const raw = JSON.parse(await readFile(join(deploymentsDir, `${name}.json`), "utf8"));
+      expect(raw.upgradeStorageLayout).toBeUndefined();
+    }
   });
 
-  it("skips when artifact bytecode does not match deployment bytecode", async () => {
-    const deployedBytecode = makeBytecode("deadbeef", 10);
-    const artifactBytecode = makeBytecode("cafebabe", 10); // different core
-    await writeDeployment("MyContract", { address: "0x1", deployedBytecode });
-    const hre = makeHre(artifactBytecode);
+  it("does not record when the chain runs different code", async () => {
+    const chain = makeMockChain({ code: { [IMPL]: "0x6080604052" + "ab".repeat(32) + "ff" } });
 
-    await deployOverride(
-      { network: "localhost" },
-      hre as never,
-      vi.fn().mockResolvedValue(undefined),
-    );
+    await deployOverride({}, makeHre(chain) as never, runSuper());
 
-    const result = await readDeploymentFile("MyContract");
-    expect(result.upgradeStorageLayout).toBeUndefined();
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
   });
 
-  it("skips when getContractBuildData throws (artifact not found)", async () => {
-    const bytecode = makeBytecode("60806040", 10);
-    await writeDeployment("MyContract", {
-      address: "0x1",
-      deployedBytecode: bytecode,
-    });
-    vi.mocked(getContractBuildData).mockRejectedValue(new Error("artifact not found"));
-    const hre = makeHre(bytecode);
+  it("ignores deployments no proxy points at", async () => {
+    await writeDeployment(deploymentsDir, "MyContract", { address: PROXY });
 
-    await deployOverride(
-      { network: "localhost" },
-      hre as never,
-      vi.fn().mockResolvedValue(undefined),
-    );
+    await deployOverride({}, makeHre(liveChain()) as never, runSuper());
 
-    const result = await readDeploymentFile("MyContract");
-    expect(result.upgradeStorageLayout).toBeUndefined();
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
   });
 
-  it("skips deployments without deployedBytecode", async () => {
-    await writeDeployment("MyContract", { address: "0x1" }); // no deployedBytecode
-    const hre = makeHre(makeBytecode("60806040", 10));
-
-    await deployOverride(
-      { network: "localhost" },
-      hre as never,
-      vi.fn().mockResolvedValue(undefined),
+  it("keeps an existing record untouched", async () => {
+    await mkdir(join(deploymentsDir, ".storage-layouts"));
+    const existing = { format: 1, address: IMPL, marker: "keep" };
+    await writeFile(
+      join(deploymentsDir, ".storage-layouts", `${IMPL}.json`),
+      JSON.stringify(existing),
     );
 
-    const result = await readDeploymentFile("MyContract");
-    expect(result.upgradeStorageLayout).toBeUndefined();
+    await deployOverride({}, makeHre(liveChain()) as never, runSuper());
+
+    expect(await readRecord(deploymentsDir, IMPL)).toEqual(existing);
   });
 
-  it("only updates the selected network directory", async () => {
-    const bytecode = makeBytecode("60806040", 10);
+  it("skips recording when no RPC is reachable, without failing the deploy", async () => {
+    const result = await deployOverride({}, makeHre(makeDeadChain()) as never, runSuper());
 
-    // localhost deployment (should be updated)
-    await writeDeployment("MyContract", {
-      address: "0x1",
-      deployedBytecode: bytecode,
-    });
+    expect(result).toBe("deploy-result");
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+  });
 
-    // mainnet deployment (should remain untouched)
+  it("does not fail the deploy when recording throws", async () => {
+    // No code at the implementation address: readCode throws.
+    const result = await deployOverride({}, makeHre(makeMockChain({})) as never, runSuper());
+
+    expect(result).toBe("deploy-result");
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+  });
+
+  it("only touches the --network deployment directory", async () => {
     const mainnetDir = join(tmpDir, "deployments", "mainnet");
     await mkdir(mainnetDir, { recursive: true });
-    await writeFile(
-      join(mainnetDir, "MyContract.json"),
-      JSON.stringify({ address: "0x2", deployedBytecode: bytecode }, null, 2),
-      "utf8",
-    );
-
-    const hre = makeHre(bytecode);
-    await deployOverride(
-      { network: "localhost" },
-      hre as never,
-      vi.fn().mockResolvedValue(undefined),
-    );
-
-    const localhostResult = await readDeploymentFile("MyContract");
-    expect(localhostResult.upgradeStorageLayout).toEqual(testLayout);
-
-    const mainnetRaw = await readFile(join(mainnetDir, "MyContract.json"), "utf8");
-    const mainnetResult = JSON.parse(mainnetRaw) as Record<string, unknown>;
-    expect(mainnetResult.upgradeStorageLayout).toBeUndefined();
-  });
-
-  it("uses Hardhat global --network when task args omit network", async () => {
-    const bytecode = makeBytecode("60806040", 10);
-    await writeDeployment("MyContract", {
-      address: "0x1",
-      deployedBytecode: bytecode,
+    await writeDeployment(mainnetDir, "MyContract", { address: PROXY, implementation: IMPL });
+    await writeDeployment(mainnetDir, "MyContract_Implementation", {
+      address: IMPL,
+      deployedBytecode: COMPILED,
     });
-    const hre = makeHre(bytecode);
 
-    await deployOverride({}, hre as never, vi.fn().mockResolvedValue(undefined));
+    await deployOverride({}, makeHre(liveChain()) as never, runSuper());
 
-    const result = await readDeploymentFile("MyContract");
-    expect(result.upgradeStorageLayout).toEqual(testLayout);
+    expect(await readRecord(deploymentsDir, IMPL)).toBeDefined();
+    expect(await readRecord(mainnetDir, IMPL)).toBeUndefined();
   });
 });

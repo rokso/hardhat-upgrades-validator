@@ -1,6 +1,7 @@
 import { getStorageUpgradeReport, type StorageLayout } from "@openzeppelin/upgrades-core";
 import {
   UNSAFE_ALLOW_KINDS,
+  type BaselineInfo,
   type ValidationResult,
   type ValidationError,
   type ContractSafetyError,
@@ -104,14 +105,22 @@ export function filterSafetyErrors(
 // ---------------------------------------------------------------------------
 
 export function formatValidationResult(contractName: string, result: ValidationResult): string {
+  const baseline = result.baseline
+    ? `\n         baseline: ${describeBaseline(result.baseline)}`
+    : "";
   if (result.ok && result.warnings.length === 0) {
-    return `  [OK]   "${contractName}" — storage layout validation passed.`;
+    return `  [OK]   "${contractName}" — storage layout validation passed.${baseline}`;
   }
 
   const lines: string[] = [];
 
+  if (result.ok && result.baseline) {
+    lines.push(`  [OK]   "${contractName}" — storage layout validation passed.${baseline}`);
+  }
+
   if (!result.ok) {
     lines.push(`StorageLayoutError: Storage layout validation failed for "${contractName}"`);
+    if (result.baseline) lines.push(`  baseline: ${describeBaseline(result.baseline)}`);
     for (const err of result.errors) {
       lines.push(formatError(err));
     }
@@ -374,5 +383,22 @@ function formatWarning(w: ValidationResult["warnings"][number]): string {
       return `  [INFO] No prior deployment found for "${w.contractName}" — skipping validation (first deployment).`;
     case "storage-check-skipped":
       return `  [WARN] Storage layout validation was skipped for "${w.contractName}" (unsafeSkipStorageCheck). You are responsible for storage correctness.`;
+    case "deprecated-baseline":
+      return `  [WARN] "${w.contractName}" was validated against the deprecated upgradeStorageLayout field, which can describe code the proxy is not running. Run record-baseline with a network to replace it.`;
+    case "chain-baseline-unavailable":
+      return `  [WARN] Could not read a chain baseline for "${w.contractName}", fell back to an offline one: ${w.reason}`;
+  }
+}
+
+function describeBaseline(b: BaselineInfo): string {
+  switch (b.source) {
+    case "chain":
+      return `chain, implementation ${b.implementation} (${b.bytecodeMatch}, ${b.origin === "store" ? "stored record" : "rebuilt from explorer"})`;
+    case "offline-record":
+      return `offline record for ${b.implementation} from the deployment file (${b.bytecodeMatch}); not checked against the chain`;
+    case "deployment-file":
+      return "deployment file upgradeStorageLayout (deprecated)";
+    case "none":
+      return "none";
   }
 }

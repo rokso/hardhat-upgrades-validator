@@ -19,6 +19,20 @@ export interface UpgradesValidatorConfig {
    *   contracts until you re-enable and run `hardhat compile`.
    */
   enableCompileHook?: boolean;
+  /**
+   * Explorer used to rebuild a chain baseline from verified source when no
+   * record exists yet, keyed by network name (the `deployments/` directory).
+   * `apiKey` falls back to the `ETHERSCAN_API_KEY` environment variable and
+   * `apiUrl` to Etherscan v2, which covers every chain Etherscan indexes; set
+   * `apiUrl` for an Etherscan-compatible explorer such as Blockscout.
+   */
+  explorers?: Record<string, { apiKey?: string; apiUrl?: string }>;
+  /**
+   * Compiler cache for rebuilding verified sources. Defaults to
+   * `<os cache>/hardhat-upgrades-validator/compilers`; Hardhat's own compiler
+   * cache is checked first either way.
+   */
+  solcCacheDir?: string;
 }
 
 declare module "hardhat/types/config" {

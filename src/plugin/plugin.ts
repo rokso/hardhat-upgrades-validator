@@ -31,12 +31,18 @@ const validateUpgradeTask = task(
       "Proxy kind: transparent, uups, or beacon. Overrides auto-detection when validating contract-level safety.",
     defaultValue: "",
   })
+  .addOption({
+    name: "baseline",
+    description:
+      "Old layout source: auto (chain when reachable, else offline), chain (chain only), or deployment (deprecated deployment-file field).",
+    defaultValue: "auto",
+  })
   .setAction(() => import("./tasks/validate-upgrade.js"))
   .build();
 
 const recordBaselineTask = task(
   "record-baseline",
-  "Stamp the current compiled storageLayout into deployment files as the upgrade baseline",
+  "Record the storage layout of the implementation each proxy runs, keyed by implementation address",
 )
   .addOption({
     name: "contract",
@@ -49,7 +55,12 @@ const recordBaselineTask = task(
   })
   .addFlag({
     name: "force",
-    description: "Overwrite existing baselines",
+    description: "Overwrite existing records (never skips the bytecode proof)",
+  })
+  .addFlag({
+    name: "fromChain",
+    description:
+      "Rebuild the layout from the implementation's verified source instead of the local build",
   })
   .setAction(() => import("./tasks/record-baseline.js"))
   .build();

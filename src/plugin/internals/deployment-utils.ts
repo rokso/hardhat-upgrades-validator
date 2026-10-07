@@ -326,6 +326,7 @@ export async function getContractBuildData(
 export {
   readDeployment,
   listDeployedContractsWithLayout,
+  listDeployedProxies,
   resolveArtifactName,
 } from "./deployment-files.js";
 export type { DeploymentFile } from "./deployment-files.js";

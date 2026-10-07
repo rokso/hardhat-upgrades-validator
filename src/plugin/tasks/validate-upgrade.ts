@@ -8,10 +8,15 @@ import {
   formatValidationResult,
   filterSafetyErrors,
 } from "../../core/validator.js";
-import type { UnsafeAllowKind } from "../../types/validation.js";
+import {
+  BASELINE_MODES,
+  type BaselineMode,
+  type UnsafeAllowKind,
+  type ValidationResult,
+} from "../../types/validation.js";
 import {
   readDeployment,
-  listDeployedContractsWithLayout,
+  listDeployedProxies,
   getContractBuildData,
   createBuildInfoOutputCache,
   type BuildInfoOutputCache,
@@ -20,8 +25,10 @@ import {
   resolveDeploymentNetworks,
 } from "../internals/deployment-utils.js";
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
+import { resolveBaseline } from "../internals/baseline.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import { detectProxy, detectProxyOnchain } from "../../core/proxy-detection.js";
+import type { EthProvider } from "../../core/onchain/types.js";
 import { logger } from "../../utils/logger.js";
 
 const VALID_PROXY_KINDS: ReadonlySet<string> = new Set(["transparent", "uups", "beacon"]);
@@ -32,11 +39,19 @@ interface ValidateUpgradeArgs {
   unsafeAllow: string;
   unsafeSkipStorageCheck: boolean;
   proxyKind: string;
+  baseline?: string;
   network?: string;
 }
 
+interface RunOptions {
+  cliUnsafeAllow: UnsafeAllowKind[];
+  unsafeSkipStorageCheck: boolean;
+  proxyKind?: ProxyKind;
+  baseline: BaselineMode;
+}
+
 const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
-  { contract, all, unsafeAllow, unsafeSkipStorageCheck, proxyKind, network },
+  { contract, all, unsafeAllow, unsafeSkipStorageCheck, proxyKind, baseline, network },
   hre: HardhatRuntimeEnvironment,
 ) => {
   const cliUnsafeAllow: UnsafeAllowKind[] = unsafeAllow
@@ -49,13 +64,25 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
     );
   }
 
+  const baselineMode = (baseline || "auto") as BaselineMode;
+  if (!BASELINE_MODES.includes(baselineMode)) {
+    throw new Error(
+      `Invalid --baseline value: "${baseline}". Valid values: ${BASELINE_MODES.join(", ")}.`,
+    );
+  }
+
   if (!all && (contract === undefined || contract === "")) {
     throw new Error(
       "Provide --contract <name> to validate a single contract, or --all to validate every deployed contract.",
     );
   }
 
-  const resolvedProxyKind = proxyKind ? (proxyKind as ProxyKind) : undefined;
+  const opts: RunOptions = {
+    cliUnsafeAllow,
+    unsafeSkipStorageCheck,
+    proxyKind: proxyKind ? (proxyKind as ProxyKind) : undefined,
+    baseline: baselineMode,
+  };
 
   const projectRoot = hre.config.paths.root;
   const deploymentsBase = resolve(projectRoot, "deployments");
@@ -68,28 +95,38 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
 
   for (const networkName of targetNetworks) {
     const deploymentsDir = resolve(deploymentsBase, networkName);
-    const contractNames = all ? await listDeployedContractsWithLayout(deploymentsDir) : [contract!];
+    const contractNames = all ? await listDeployedProxies(deploymentsDir) : [contract!];
 
     if (contractNames.length === 0) {
       logger.log(`[INFO] No deployments found in ${deploymentsDir}`);
       continue;
     }
 
-    const networkConnection = await hre.network.connect(networkName).catch(() => undefined);
+    const networkConnection =
+      opts.baseline === "deployment"
+        ? undefined
+        : await hre.network.connect(networkName).catch(() => undefined);
 
     try {
       for (const name of contractNames) {
-        const result = await validateContract(
-          name,
-          deploymentsDir,
-          hre,
-          cache,
-          validations,
-          networkConnection?.provider,
-          cliUnsafeAllow,
-          unsafeSkipStorageCheck,
-          resolvedProxyKind,
-        );
+        let result: ValidationResult | null;
+        try {
+          result = await validateContract(
+            name,
+            networkName,
+            deploymentsDir,
+            hre,
+            cache,
+            validations,
+            networkConnection?.provider,
+            opts,
+          );
+        } catch (e) {
+          // One proxy's baseline failure must not hide the others' results.
+          logger.log(`  [ERROR] "${networkName}/${name}": ${(e as Error).message}`);
+          hasErrors = true;
+          continue;
+        }
 
         if (result === null) continue;
 
@@ -114,15 +151,14 @@ export default action;
 
 async function validateContract(
   name: string,
+  networkName: string,
   deploymentsDir: string,
   hre: HardhatRuntimeEnvironment,
   cache: BuildInfoOutputCache,
   validations: ValidationDataCurrent | undefined,
-  provider?: { send(method: string, params?: unknown[]): Promise<unknown> },
-  cliUnsafeAllow: UnsafeAllowKind[] = [],
-  unsafeSkipStorageCheck = false,
-  proxyKind?: ProxyKind,
-) {
+  provider: EthProvider | undefined,
+  opts: RunOptions,
+): Promise<ValidationResult | null> {
   const deployment = await readDeployment(deploymentsDir, name);
 
   if (deployment !== null) {
@@ -141,12 +177,24 @@ async function validateContract(
     }
   }
 
-  const oldLayout = deployment?.upgradeStorageLayout;
+  const baseline = await resolveBaseline({
+    name,
+    deployment,
+    deploymentsDir,
+    networkName,
+    mode: opts.baseline,
+    provider,
+    config: hre.config.upgradesValidator,
+  });
 
-  if (oldLayout === undefined && deployment !== null) {
+  if (baseline.layout === undefined && deployment !== null) {
     logger.log(
-      `  [SKIP] "${name}" — deployment exists but has no upgradeStorageLayout. Run record-baseline to populate it.`,
+      `  [SKIP] "${name}": no baseline. The chain could not supply one and no offline record exists. ` +
+        `Run validate-upgrade with a reachable network, or record-baseline.`,
     );
+    for (const w of baseline.warnings) {
+      if (w.kind === "chain-baseline-unavailable") logger.log(`         reason: ${w.reason}`);
+    }
     return null;
   }
 
@@ -166,7 +214,13 @@ async function validateContract(
       namespaceUnsafeAllow,
       safetyErrors,
       proxyKind: resolvedProxyKind,
-    } = await getContractBuildData(artifactName, hre.artifacts, validations, cache, proxyKind));
+    } = await getContractBuildData(
+      artifactName,
+      hre.artifacts,
+      validations,
+      cache,
+      opts.proxyKind,
+    ));
   } catch {
     logger.log(`  [SKIP] "${name}" — artifact not found. Has the contract been compiled?`);
     return null;
@@ -181,10 +235,10 @@ async function validateContract(
     return null;
   }
 
-  const unsafeAllow = [...cliUnsafeAllow, ...unsafeAllowFromAnnotation];
-  const result = validateStorageUpgrade(name, oldLayout, upgradeStorageLayout, {
+  const unsafeAllow = [...opts.cliUnsafeAllow, ...unsafeAllowFromAnnotation];
+  const result = validateStorageUpgrade(name, baseline.layout, upgradeStorageLayout, {
     unsafeAllow,
-    unsafeSkipStorageCheck,
+    unsafeSkipStorageCheck: opts.unsafeSkipStorageCheck,
     perVariableUnsafeAllow,
     namespaceUnsafeAllow,
     kind: resolvedProxyKind,
@@ -192,5 +246,7 @@ async function validateContract(
   const filteredSafety = filterSafetyErrors(safetyErrors, unsafeAllow);
   result.safetyErrors = filteredSafety;
   if (filteredSafety.length > 0) result.ok = false;
+  result.baseline = baseline.info;
+  result.warnings.push(...baseline.warnings);
   return result;
 }

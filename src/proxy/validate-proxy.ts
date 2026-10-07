@@ -1,9 +1,9 @@
 /**
  * Proxy upgrade validation helpers for use in hardhat-deploy / rocketh deploy scripts.
  *
- * Both the old layout (from the recorded baseline) and the new layout (from
- * the validations cache) are resolved automatically — no need to pass them
- * explicitly.
+ * The old layout is the implementation the proxy runs right now, read from the
+ * chain (see `baseline`), and the new layout comes from the validations cache.
+ * Neither needs to be passed explicitly.
  *
  * Usage:
  *
@@ -19,12 +19,13 @@
 import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 import { resolve } from "node:path";
 
-import type { UnsafeAllowKind, ValidationResult } from "../types/validation.js";
+import type { BaselineMode, UnsafeAllowKind, ValidationResult } from "../types/validation.js";
 import {
   validateStorageUpgrade,
   formatValidationResult,
   filterSafetyErrors,
 } from "../core/validator.js";
+import type { EthProvider } from "../core/onchain/types.js";
 
 /**
  * Thrown by `assertProxyUpgrade` when storage layout validation fails.
@@ -44,18 +45,23 @@ import {
 } from "../plugin/internals/deployment-utils.js";
 import { loadValidationsFromDisk } from "../plugin/internals/validations-cache.js";
 import { getInMemoryValidations } from "../plugin/hooks/compile.js";
+import { resolveBaseline, type ResolvedBaseline } from "../plugin/internals/baseline.js";
 
 export interface ProxyUpgradeOptions {
   unsafeAllow?: UnsafeAllowKind[];
   unsafeSkipStorageCheck?: boolean;
   /** Override the new implementation artifact name for this call only. */
   newImpl?: string;
+  /** Where the old layout comes from. Defaults to `auto` (the chain when reachable). */
+  baseline?: BaselineMode;
+  /** Provider to read the chain with. Defaults to a connection to the `--network` network. */
+  provider?: EthProvider;
 }
 
 async function resolveLayouts(
   hre: HardhatRuntimeEnvironment,
   contractName: string,
-  newImplOverride?: string,
+  options: ProxyUpgradeOptions,
 ) {
   const network = hre.globalOptions.network?.trim();
   if (!network) {
@@ -66,12 +72,24 @@ async function resolveLayouts(
 
   const deploymentsDir = resolve(hre.config.paths.root, "deployments", network);
   const deployment = await readDeployment(deploymentsDir, contractName);
-  const oldLayout = deployment?.upgradeStorageLayout;
+
+  const mode = options.baseline ?? "auto";
+  const baseline = await withProvider(hre, mode, options.provider, (provider) =>
+    resolveBaseline({
+      name: contractName,
+      deployment,
+      deploymentsDir,
+      networkName: network,
+      mode,
+      provider,
+      config: hre.config.upgradesValidator,
+    }),
+  );
 
   const validations =
     getInMemoryValidations() ?? (await loadValidationsFromDisk(hre.config.paths.cache));
 
-  const artifactName = newImplOverride ?? resolveArtifactName(deployment, contractName);
+  const artifactName = options.newImpl ?? resolveArtifactName(deployment, contractName);
 
   const cache = createBuildInfoOutputCache();
   const {
@@ -84,7 +102,7 @@ async function resolveLayouts(
   } = await getContractBuildData(artifactName, hre.artifacts, validations, cache);
 
   return {
-    oldLayout,
+    baseline,
     newLayout,
     unsafeAllowFromAnnotation,
     perVariableUnsafeAllow,
@@ -94,20 +112,37 @@ async function resolveLayouts(
   };
 }
 
+// Opens a connection to the --network network unless the caller passed a
+// provider or the mode never reads the chain. A failed connect means offline.
+async function withProvider(
+  hre: HardhatRuntimeEnvironment,
+  mode: BaselineMode,
+  provider: EthProvider | undefined,
+  fn: (provider: EthProvider | undefined) => Promise<ResolvedBaseline>,
+): Promise<ResolvedBaseline> {
+  if (provider !== undefined || mode === "deployment") return fn(provider);
+  const connection = await hre.network?.connect().catch(() => undefined);
+  try {
+    return await fn(connection?.provider);
+  } finally {
+    await connection?.close().catch(() => {});
+  }
+}
+
 export async function validateProxyUpgrade(
   hre: HardhatRuntimeEnvironment,
   contractName: string,
   options: ProxyUpgradeOptions = {},
 ): Promise<ValidationResult> {
   const {
-    oldLayout,
+    baseline,
     newLayout,
     unsafeAllowFromAnnotation,
     perVariableUnsafeAllow,
     namespaceUnsafeAllow,
     safetyErrors,
     proxyKind,
-  } = await resolveLayouts(hre, contractName, options.newImpl);
+  } = await resolveLayouts(hre, contractName, options);
 
   if (newLayout === undefined) {
     throw new Error(
@@ -117,7 +152,7 @@ export async function validateProxyUpgrade(
 
   const unsafeAllow = [...(options.unsafeAllow ?? []), ...(unsafeAllowFromAnnotation ?? [])];
 
-  const result = validateStorageUpgrade(contractName, oldLayout, newLayout, {
+  const result = validateStorageUpgrade(contractName, baseline.layout, newLayout, {
     unsafeAllow,
     unsafeSkipStorageCheck: options.unsafeSkipStorageCheck,
     perVariableUnsafeAllow,
@@ -128,6 +163,8 @@ export async function validateProxyUpgrade(
   const filteredSafety = filterSafetyErrors(safetyErrors, unsafeAllow);
   result.safetyErrors = filteredSafety;
   if (filteredSafety.length > 0) result.ok = false;
+  result.baseline = baseline.info;
+  result.warnings.push(...baseline.warnings);
 
   return result;
 }

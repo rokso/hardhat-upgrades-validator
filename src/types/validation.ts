@@ -23,7 +23,38 @@ export interface ValidationResult {
   errors: ValidationError[];
   safetyErrors: ContractSafetyError[];
   warnings: ValidationWarning[];
+  /** Which layout the new build was compared against. Set by the plugin entry points. */
+  baseline?: BaselineInfo;
 }
+
+/**
+ * Provenance of the "before" layout, printed with every result so a reader
+ * never has to guess what was compared.
+ *
+ * - `chain`: the implementation the proxy runs now, read from the chain.
+ * - `offline-record`: a stored record for the implementation named in the
+ *   deployment file; correct unless the proxy and the file have drifted apart.
+ * - `deployment-file`: the deprecated `upgradeStorageLayout` field.
+ * - `none`: no baseline available.
+ */
+export type BaselineInfo =
+  | {
+      source: "chain";
+      implementation: string;
+      bytecodeMatch: string;
+      origin: "store" | "explorer";
+    }
+  | { source: "offline-record"; implementation: string; bytecodeMatch: string }
+  | { source: "deployment-file" }
+  | { source: "none" };
+
+/**
+ * - `auto`: the chain when reachable, otherwise an offline baseline.
+ * - `chain`: the chain only; fails when it cannot supply one.
+ * - `deployment`: the deployment file only (pre-0.1.0-alpha.2 behavior).
+ */
+export type BaselineMode = "auto" | "chain" | "deployment";
+export const BASELINE_MODES: readonly BaselineMode[] = ["auto", "chain", "deployment"];
 
 export type ValidationError =
   | { kind: "variable-removed"; label: string; slot: string; type: string }
@@ -48,7 +79,9 @@ export type ValidationError =
 export type ValidationWarning =
   | { kind: "gap-shrunken"; label: string; oldSize: number; newSize: number }
   | { kind: "no-baseline"; contractName: string }
-  | { kind: "storage-check-skipped"; contractName: string };
+  | { kind: "storage-check-skipped"; contractName: string }
+  | { kind: "deprecated-baseline"; contractName: string }
+  | { kind: "chain-baseline-unavailable"; contractName: string; reason: string };
 
 // ---------------------------------------------------------------------------
 // Validation options

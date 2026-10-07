@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased (0.1.0-alpha.2)
+
+Chain-sourced baselines: the "before" layout is now the implementation each proxy runs on-chain, not a layout stamped into the deployment file.
+
+- `validate-upgrade` and `assertProxyUpgrade` / `validateProxyUpgrade` read the implementation from the proxy's ERC-1967 slot (or beacon) and validate against its layout. New `--baseline` / `baseline` option: `auto` (default), `chain`, `deployment`. Every result names its baseline.
+- Layout records keyed by implementation address under `deployments/<network>/.storage-layouts/`, bound to the exact runtime code by hash. Missing records are rebuilt from the implementation's verified source (Etherscan v2 or any Etherscan-compatible explorer) after proving the rebuild matches the deployed code.
+- Bytecode comparison masks immutables (`immutables-only`), so UUPS implementations (`UUPSUpgradeable.__self`) match on-chain code.
+- `record-baseline --from-chain` rebuilds records from verified source for proxies running code the local tree has moved past.
+- New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, for Hardhat v2 projects and scripts.
+- New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.
+
+### Breaking (alpha)
+
+- The deploy hook and `record-baseline` write `.storage-layouts/` records; they no longer write `upgradeStorageLayout`. The field is still read as a deprecated fallback.
+- `record-baseline` needs an RPC, and `--force` no longer skips the bytecode check.
+- `validate-upgrade --all` covers every proxy deployment, not only those with a stamped baseline.
+
 ## 0.1.0-alpha.1 (2026-04-08)
 
 Initial alpha release.

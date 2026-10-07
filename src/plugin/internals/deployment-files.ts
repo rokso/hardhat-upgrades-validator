@@ -50,6 +50,34 @@ export async function listDeployedContractsWithLayout(deploymentsDir: string): P
   return names;
 }
 
+// hardhat-deploy's companion files for a proxy deployment `X`; validating them
+// would compare the proxy's or the bare implementation's code, not `X`.
+const COMPANION_SUFFIXES = ["_Proxy", "_Implementation"];
+
+/**
+ * Returns deployments that can have a baseline: proxies (an `implementation`
+ * field, so the chain or a stored record can supply one) and deployments that
+ * still carry a deprecated `upgradeStorageLayout`.
+ */
+export async function listDeployedProxies(deploymentsDir: string): Promise<string[]> {
+  const files = await listDirOrEmpty(deploymentsDir);
+
+  const names: string[] = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const name = file.slice(0, -5);
+    if (COMPANION_SUFFIXES.some((s) => name.endsWith(s))) continue;
+    const deployment = await readDeployment(deploymentsDir, name);
+    if (
+      deployment?.implementation !== undefined ||
+      deployment?.upgradeStorageLayout !== undefined
+    ) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
 /**
  * Returns the fully-qualified artifact name for a deployment file.
  * Falls back to the deployment name if the file has no contractName.

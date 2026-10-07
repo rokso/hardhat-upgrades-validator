@@ -17,7 +17,7 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
   return {
     ...orig,
-    listDeployedContractsWithLayout: vi.fn(),
+    listDeployedProxies: vi.fn(),
     getContractBuildData: vi.fn(),
     createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
     resolveArtifactName: vi.fn().mockImplementation((_: unknown, name: string) => name),
@@ -47,7 +47,7 @@ vi.mock("../src/core/validator.js", () => ({
 
 import validateUpgradeAction from "../src/plugin/tasks/validate-upgrade.js";
 import {
-  listDeployedContractsWithLayout,
+  listDeployedProxies,
   getContractBuildData,
   readDeployment,
 } from "../src/plugin/internals/deployment-utils.js";
@@ -89,7 +89,7 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vutest-"));
   vi.clearAllMocks();
   // Default stubs — individual tests override as needed.
-  vi.mocked(listDeployedContractsWithLayout).mockResolvedValue([]);
+  vi.mocked(listDeployedProxies).mockResolvedValue([]);
   vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   vi.mocked(readDeployment).mockResolvedValue(null);
 });
@@ -139,7 +139,7 @@ describe("argument validation", () => {
 
   it("returns early (no error) when --all is true but no deployments exist", async () => {
     const hre = makeHre(tmpDir);
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue([]);
+    vi.mocked(listDeployedProxies).mockResolvedValue([]);
     await expect(
       validateUpgradeAction(
         {
@@ -162,7 +162,7 @@ describe("argument validation", () => {
 
 describe("unsafeAllow token parsing", () => {
   beforeEach(() => {
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue(["MyContract"]);
+    vi.mocked(listDeployedProxies).mockResolvedValue(["MyContract"]);
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   });
@@ -252,7 +252,7 @@ describe("unsafeAllow token parsing", () => {
 
 describe("proxyKind override parsing", () => {
   beforeEach(() => {
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue(["MyContract"]);
+    vi.mocked(listDeployedProxies).mockResolvedValue(["MyContract"]);
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   });
@@ -339,7 +339,7 @@ describe("proxyKind override parsing", () => {
       hre as never,
     );
 
-    const calledWithDir = vi.mocked(listDeployedContractsWithLayout).mock.calls[0]?.[0];
+    const calledWithDir = vi.mocked(listDeployedProxies).mock.calls[0]?.[0];
     expect(calledWithDir).toContain(join("deployments", "mainnet"));
   });
 });

@@ -27,8 +27,81 @@ export type BytecodeMatchResult =
   | { match: "none" };
 
 export function compareBytecode(a: string, b: string): BytecodeMatchResult {
-  const normalise = (s: string) => s.toLowerCase().replace(/^0x/, "");
-  if (normalise(a) === normalise(b)) return { match: "exact" };
+  if (normalize(a) === normalize(b)) return { match: "exact" };
   if (stripBytecodeMetadata(a) === stripBytecodeMetadata(b)) return { match: "metadata-only" };
   return { match: "none" };
+}
+
+function normalize(s: string): string {
+  return s.toLowerCase().replace(/^0x/, "");
+}
+
+// ---------------------------------------------------------------------------
+// Compiled-vs-on-chain comparison
+// ---------------------------------------------------------------------------
+
+/**
+ * solc's `evm.deployedBytecode.immutableReferences`: AST id to the byte spans
+ * (relative to the deployed bytecode) that the constructor fills in.
+ */
+export type ImmutableReferences = Record<string, ReadonlyArray<{ start: number; length: number }>>;
+
+/**
+ * - `exact`: byte-identical.
+ * - `immutables-only`: identical once immutable (and library-link) spans are
+ *   masked. Same code, deployment-specific values. Every UUPS implementation
+ *   lands here because `UUPSUpgradeable.__self` is immutable.
+ * - `metadata-only`: identical after masking and stripping the CBOR metadata,
+ *   so the compiler input was not byte-identical (source hashes or settings).
+ * - `none`: different code.
+ */
+export type DeployedBytecodeMatch = "exact" | "immutables-only" | "metadata-only" | "none";
+
+// solc leaves `__$<34 hex>$__` (20 bytes) where an external library address is linked.
+const LINK_PLACEHOLDER = /__\$[0-9a-fA-F]{34}\$__/g;
+
+/**
+ * Compares runtime code read with `eth_getCode` against compiler output.
+ *
+ * On-chain code has immutables filled in while compiler output has them
+ * zeroed, and the difference sits in the code body where metadata stripping
+ * cannot reach, so the spans are zeroed on both sides before comparing.
+ */
+export function compareDeployedBytecode(
+  onchain: string,
+  compiled: string,
+  immutableReferences: ImmutableReferences = {},
+): DeployedBytecodeMatch {
+  const live = normalize(onchain);
+  const built = normalize(compiled);
+  if (live === built) return "exact";
+
+  const spans: Array<{ start: number; length: number }> = Object.values(immutableReferences).flat();
+  for (const m of built.matchAll(LINK_PLACEHOLDER)) {
+    spans.push({ start: m.index / 2, length: 20 });
+  }
+  const builtHex = built.replace(LINK_PLACEHOLDER, "0".repeat(40));
+
+  const liveMasked = maskSpans(live, spans);
+  const builtMasked = maskSpans(builtHex, spans);
+  if (liveMasked === undefined || builtMasked === undefined) return "none";
+  if (liveMasked === builtMasked) return "immutables-only";
+  if (stripBytecodeMetadata(liveMasked) === stripBytecodeMetadata(builtMasked)) {
+    return "metadata-only";
+  }
+  return "none";
+}
+
+// Returns undefined when the hex is malformed or a span falls outside the code.
+function maskSpans(
+  hex: string,
+  spans: ReadonlyArray<{ start: number; length: number }>,
+): string | undefined {
+  const buf = Buffer.from(hex, "hex");
+  if (buf.length * 2 !== hex.length) return undefined;
+  for (const { start, length } of spans) {
+    if (start + length > buf.length) return undefined;
+    buf.fill(0, start, start + length);
+  }
+  return buf.toString("hex");
 }

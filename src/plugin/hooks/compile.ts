@@ -48,11 +48,12 @@ import {
 } from "../../core/validator.js";
 import {
   readDeployment,
-  listDeployedContractsWithLayout,
+  listDeployedProxies,
   getContractBuildData,
   createBuildInfoOutputCache,
   resolveArtifactName,
 } from "../internals/deployment-utils.js";
+import { resolveBaseline } from "../internals/baseline.js";
 import { listSubdirsOrEmpty } from "../../utils/io.js";
 import { logger } from "../../utils/logger.js";
 
@@ -276,15 +277,26 @@ async function runAutoValidation(
 
   for (const network of networkDirs) {
     const deploymentsDir = resolve(deploymentsBase, network);
-    const contractNames = await listDeployedContractsWithLayout(deploymentsDir);
+    const contractNames = await listDeployedProxies(deploymentsDir);
 
     for (const name of contractNames) {
       const deployment = await readDeployment(deploymentsDir, name);
 
       if (!deployment) continue;
 
-      // listDeployedContractsWithLayout guarantees upgradeStorageLayout is present.
-      const oldLayout = deployment.upgradeStorageLayout!;
+      // Compiling must not need an RPC or explorer, so this is always offline:
+      // the stored record for the deployment file's implementation, else the
+      // deprecated field. validate-upgrade and assertProxyUpgrade read the chain.
+      const baseline = await resolveBaseline({
+        name,
+        deployment,
+        deploymentsDir,
+        networkName: network,
+        mode: "auto",
+        config: context.config.upgradesValidator,
+      });
+      const oldLayout = baseline.layout;
+      if (oldLayout === undefined) continue;
 
       const artifactName = resolveArtifactName(deployment, name);
 
@@ -322,6 +334,8 @@ async function runAutoValidation(
       const filteredSafety = filterSafetyErrors(safetyErrors, unsafeAllowFromAnnotation);
       validation.safetyErrors = filteredSafety;
       if (filteredSafety.length > 0) validation.ok = false;
+      validation.baseline = baseline.info;
+      validation.warnings.push(...baseline.warnings);
 
       const message = formatValidationResult(name, validation);
 
