@@ -28,13 +28,6 @@ vi.mock("@openzeppelin/upgrades-core", async (importOriginal) => {
   };
 });
 
-// validations-cache is used only in buildHandler, not per job, but
-// compile.ts imports it statically, so provide a safe stub.
-vi.mock("../src/plugin/validations-cache.js", () => ({
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
-  writeValidationsToDisk: vi.fn().mockResolvedValue(undefined),
-}));
-
 // deployment-utils is used only in buildHandler; stub it out.
 vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();

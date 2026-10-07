@@ -1,4 +1,5 @@
 import "hardhat/types/config";
+import type { ConfigurationVariable, ResolvedConfigurationVariable } from "hardhat/types/config";
 
 export interface UpgradesValidatorConfig {
   /**
@@ -25,8 +26,10 @@ export interface UpgradesValidatorConfig {
    * `apiKey` falls back to the `ETHERSCAN_API_KEY` environment variable and
    * `apiUrl` to Etherscan v2, which covers every chain Etherscan indexes; set
    * `apiUrl` for an Etherscan-compatible explorer such as Blockscout.
+   * `apiKey` may be a `configVariable(...)`; it is read only when a baseline
+   * has to be rebuilt.
    */
-  explorers?: Record<string, { apiKey?: string; apiUrl?: string }>;
+  explorers?: Record<string, { apiKey?: string | ResolvedConfigurationVariable; apiUrl?: string }>;
   /**
    * Compiler cache for rebuilding verified sources. Defaults to
    * `<os cache>/hardhat-upgrades-validator/compilers`; Hardhat's own compiler
@@ -35,9 +38,14 @@ export interface UpgradesValidatorConfig {
   solcCacheDir?: string;
 }
 
+/** As written in `hardhat.config.ts`. */
+export interface UpgradesValidatorUserConfig extends Omit<UpgradesValidatorConfig, "explorers"> {
+  explorers?: Record<string, { apiKey?: string | ConfigurationVariable; apiUrl?: string }>;
+}
+
 declare module "hardhat/types/config" {
   interface HardhatUserConfig {
-    upgradesValidator?: UpgradesValidatorConfig;
+    upgradesValidator?: UpgradesValidatorUserConfig;
   }
   interface HardhatConfig {
     upgradesValidator?: UpgradesValidatorConfig;

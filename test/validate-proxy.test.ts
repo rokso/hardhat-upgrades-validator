@@ -16,7 +16,8 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/plugin/internals/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -209,6 +210,13 @@ describe("validateProxyUpgrade", () => {
     );
   });
 
+  it("throws the same when --network was not passed, which Hardhat leaves undefined", async () => {
+    await expect(
+      // (makeHre(undefined) would take its default network.)
+      validateProxyUpgrade({ ...makeHre(), globalOptions: {} } as never, "MyContract"),
+    ).rejects.toThrow(/Could not determine network/);
+  });
+
   it("throws when new layout is not in validation cache", async () => {
     vi.mocked(readDeployment).mockResolvedValue(null);
     mockBuildData(undefined);
@@ -288,5 +296,41 @@ describe("assertProxyUpgrade", () => {
 
   it("throws when network is not set", async () => {
     await expect(assertProxyUpgrade(makeHre("") as never, "MyContract")).rejects.toThrow(/network/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Offline baseline from the proxy index
+// ---------------------------------------------------------------------------
+
+describe("offline, with a proxy index", () => {
+  it("throws for an indexed proxy whose implementation has no record, never passing it as new", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { updateProxyEntry } = await import("../src/core/onchain/store.js");
+    const { BaselineUnavailableError } = await import("../src/core/onchain/errors.js");
+
+    const root = await mkdtemp(join(tmpdir(), "hhuv-proxyhelper-"));
+    try {
+      const proxy = "0x00000000000000000000000000000000000000aa";
+      await updateProxyEntry(join(root, "deployments", "localhost", ".storage-layouts"), {
+        format: 1,
+        proxy,
+        chainId: 1,
+        implementation: "0x00000000000000000000000000000000000000bb",
+        deployments: ["MyContract"],
+        observedAtBlock: 42,
+      });
+      vi.mocked(readDeployment).mockResolvedValue({ address: proxy });
+      mockBuildData(layout);
+      const hre = { ...makeHre(), config: { paths: { root, cache: join(root, "cache") } } };
+
+      await expect(assertProxyUpgrade(hre as never, "MyContract")).rejects.toThrow(
+        BaselineUnavailableError,
+      );
+    } finally {
+      await rm(root, { recursive: true });
+    }
   });
 });

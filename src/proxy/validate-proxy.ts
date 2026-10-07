@@ -20,6 +20,8 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 import { resolve } from "node:path";
 
 import type { BaselineMode, UnsafeAllowKind, ValidationResult } from "../types/validation.js";
+
+export type { BaselineInfo, BaselineMode, ValidationResult } from "../types/validation.js";
 import {
   validateStorageUpgrade,
   formatValidationResult,
@@ -42,8 +44,12 @@ import {
   getContractBuildData,
   createBuildInfoOutputCache,
   resolveArtifactName,
+  selectedNetwork,
 } from "../plugin/internals/deployment-utils.js";
-import { loadValidationsFromDisk } from "../plugin/internals/validations-cache.js";
+import {
+  loadValidationsFromDisk,
+  missingLayoutReason,
+} from "../plugin/internals/validations-cache.js";
 import { getInMemoryValidations } from "../plugin/hooks/compile.js";
 import { resolveBaseline, type ResolvedBaseline } from "../plugin/internals/baseline.js";
 
@@ -63,8 +69,8 @@ async function resolveLayouts(
   contractName: string,
   options: ProxyUpgradeOptions,
 ) {
-  const network = hre.globalOptions.network?.trim();
-  if (!network) {
+  const network = selectedNetwork(hre);
+  if (network === undefined) {
     throw new Error(
       "[hardhat-upgrades-validator] Could not determine network. Pass --network when running your deploy script.",
     );
@@ -103,6 +109,7 @@ async function resolveLayouts(
 
   return {
     baseline,
+    validations,
     newLayout,
     unsafeAllowFromAnnotation,
     perVariableUnsafeAllow,
@@ -136,6 +143,7 @@ export async function validateProxyUpgrade(
 ): Promise<ValidationResult> {
   const {
     baseline,
+    validations,
     newLayout,
     unsafeAllowFromAnnotation,
     perVariableUnsafeAllow,
@@ -146,7 +154,7 @@ export async function validateProxyUpgrade(
 
   if (newLayout === undefined) {
     throw new Error(
-      `[hardhat-upgrades-validator] Storage layout for "${contractName}" not found in validation cache. Run \`hardhat compile\` first.`,
+      `[hardhat-upgrades-validator] No storage layout for "${contractName}": ${missingLayoutReason(validations)}`,
     );
   }
 

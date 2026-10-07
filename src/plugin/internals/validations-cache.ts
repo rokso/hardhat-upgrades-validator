@@ -9,7 +9,7 @@
  * cannot corrupt the cache. Pattern adapted from @openzeppelin/hardhat-upgrades (MIT).
  */
 
-import { readFile, writeFile, mkdir, open } from "node:fs/promises";
+import { readFile, writeFile, mkdir, open, rm } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { lock as lockfile } from "proper-lockfile";
 import { type ValidationDataCurrent, isCurrentValidationData } from "@openzeppelin/upgrades-core";
@@ -53,4 +53,21 @@ export async function writeValidationsToDisk(
   } finally {
     await releaseLock?.();
   }
+}
+
+/** Removes the cache, so the next build recompiles every contract into it. */
+export async function removeValidationsFromDisk(hardhatCachePath: string): Promise<void> {
+  await rm(validationsCachePath(hardhatCachePath), { force: true });
+}
+
+/**
+ * Why a compiled contract has no layout. Callers fail on it: a missing cache
+ * means no build has validated the current code, not that there is nothing
+ * to check.
+ */
+export function missingLayoutReason(validations: ValidationDataCurrent | undefined): string {
+  return validations === undefined
+    ? "the validation cache is missing: a build is running, or the last one failed, was " +
+        "interrupted or could not validate a contract. Run `hardhat compile` and check its warnings."
+    : "its storage layout is not in the validation cache. Run `hardhat compile` and check its warnings.";
 }

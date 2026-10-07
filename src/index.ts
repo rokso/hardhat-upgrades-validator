@@ -19,4 +19,6 @@ export type {
   ValidationWarning,
   UnsafeAllowKind,
   ValidateOptions,
+  BaselineMode,
+  BaselineInfo,
 } from "./types/validation.js";

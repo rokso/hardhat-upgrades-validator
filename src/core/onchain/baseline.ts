@@ -26,8 +26,11 @@ import type { EthProvider, ImplementationLayoutRecord } from "./types.js";
 export interface ChainBaselineOptions {
   provider: EthProvider;
   storeDir: string;
-  /** Needed only when no record exists yet for the implementation. */
-  explorer?: ExplorerConfig;
+  /**
+   * Needed only when no record exists yet for the implementation. A function
+   * is called only then, so a secret it reads is not read otherwise.
+   */
+  explorer?: ExplorerConfig | (() => Promise<ExplorerConfig>);
   solc?: SolcOptions;
   /** Rebuild from the explorer even when a record exists. */
   refresh?: boolean;
@@ -68,14 +71,16 @@ export async function resolveImplementationLayout(
     return { implementation: address, record: stored, origin: "store" };
   }
 
-  if (options.explorer === undefined || !canQueryExplorer(options.explorer)) {
+  const explorer =
+    typeof options.explorer === "function" ? await options.explorer() : options.explorer;
+  if (explorer === undefined || !canQueryExplorer(explorer)) {
     throw new BaselineUnavailableError(
       `No layout record for implementation ${address} and no explorer configured to rebuild one.`,
     );
   }
 
   const chainId = await readChainId(provider);
-  const source = await fetchVerifiedSource(chainId, address, options.explorer);
+  const source = await fetchVerifiedSource(chainId, address, explorer);
   const solc = await getSolc(source.solcLongVersion, options.solc);
   const rebuilt = await reconstructLayout(source, solc, code);
 

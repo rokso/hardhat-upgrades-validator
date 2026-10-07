@@ -26,11 +26,6 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/plugin/validations-cache.js", () => ({
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
-  writeValidationsToDisk: vi.fn().mockResolvedValue(undefined),
-}));
-
 vi.mock("../src/core/validator.js", () => ({
   validateStorageUpgrade: vi.fn().mockReturnValue({
     ok: true,
@@ -80,6 +75,7 @@ function makeContext() {
       paths: { root: tmpDir, cache: join(tmpDir, "cache") },
     },
     artifacts: {},
+    solidity: { getRootFilePaths: vi.fn().mockResolvedValue([]) },
   };
 }
 
@@ -337,7 +333,7 @@ describe("auto-validation from the proxy index", () => {
     expect(vi.mocked(getContractBuildData).mock.calls.map((c) => c[0])).toEqual(["Recorded"]);
     const out = logs.join("\n");
     expect(out).toMatch(
-      /\[SKIP\] "mainnet\/Unrecorded": no layout record for 0x0+cc, the implementation as of block 42/,
+      /\[SKIP\] "mainnet\/Unrecorded": No baseline for "Unrecorded": no layout record for 0x0+cc, the implementation as of block 42/,
     );
     expect(out).toMatch(/Storage layout checks passed; 1 skipped/);
     expect(out).not.toMatch(/All storage layout checks passed/);

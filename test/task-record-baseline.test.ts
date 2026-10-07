@@ -26,7 +26,8 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/plugin/internals/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -38,6 +39,7 @@ vi.mock("../src/core/onchain/baseline.js", async (importOriginal) => {
 import recordBaselineAction from "../src/plugin/tasks/record-baseline.js";
 import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
 import { resolveImplementationLayout } from "../src/core/onchain/baseline.js";
+import { readScanMarker } from "../src/core/onchain/store.js";
 import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 
 // ---------------------------------------------------------------------------
@@ -117,7 +119,7 @@ function makeHre(provider: { send: unknown } | undefined, config: Record<string,
   };
 }
 
-const baseArgs = { contract: "MyContract", all: false, force: false, network: "localhost" };
+const baseArgs = { contract: "MyContract", all: false, force: false };
 
 let logs: string[];
 
@@ -236,6 +238,20 @@ describe("local build", () => {
     await recordBaselineAction({ ...baseArgs, force: true }, makeHre(chain) as never);
 
     expect(await readRecord(IMPL)).toBeUndefined();
+  });
+
+  it("fails, recording nothing, when the new layout is missing from the validation cache", async () => {
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+    vi.mocked(getContractBuildData).mockResolvedValue({ upgradeStorageLayout: undefined } as never);
+
+    await recordBaselineAction(baseArgs, makeHre(chain) as never);
+
+    expect(await readRecord(IMPL)).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/\[ERROR\] "MyContract": the validation cache is missing/);
+    expect(process.exitCode).toBe(1);
   });
 
   it("skips when the artifact is not found", async () => {
@@ -364,14 +380,51 @@ describe("discovery failures", () => {
     expect(await readRecord(IMPL)).toBeDefined();
     expect(logs.join("\n")).toMatch(/\[ERROR\] 0x0+dd \("Broken"\)/);
     expect(process.exitCode).toBe(1);
+    // Not a complete scan, so later deploys keep classifying everything.
+    expect(await readScanMarker(join(deploymentsDir, ".storage-layouts"))).toBeUndefined();
+  });
+
+  it("--all reports an indexed proxy the chain no longer shows", async () => {
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+    await recordBaselineAction(
+      { ...baseArgs, contract: undefined, all: true },
+      makeHre(chain) as never,
+    );
+    logs = [];
+
+    await recordBaselineAction(
+      { ...baseArgs, contract: undefined, all: true },
+      makeHre(makeMockChain()) as never,
+    );
+
+    expect(logs.join("\n")).toMatch(/\[ERROR\] 0x0+aa .*the chain shows no proxy there now/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("fails, recording nothing, when the RPC answers for another chain", async () => {
+    await writeFile(join(deploymentsDir, ".chain"), JSON.stringify({ chainId: "5" }));
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+
+    await recordBaselineAction(
+      { ...baseArgs, contract: undefined, all: true },
+      makeHre(chain) as never,
+    );
+
+    expect(await readRecord(IMPL)).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/\[ERROR\] "localhost": The RPC answers for chain 1/);
+    expect(process.exitCode).toBe(1);
   });
 
   it("records even when the proxy index cannot be written", async () => {
-    await mkdir(join(deploymentsDir, ".storage-layouts", "proxies"), { recursive: true });
-    await writeFile(
-      join(deploymentsDir, ".storage-layouts", "proxies", `${PROXY}.json`),
-      JSON.stringify({ format: 2 }),
-    );
+    // A file where the index directory should be: every write fails.
+    await mkdir(join(deploymentsDir, ".storage-layouts"), { recursive: true });
+    await writeFile(join(deploymentsDir, ".storage-layouts", "proxies"), "");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const chain = makeMockChain({
       code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
@@ -465,9 +518,10 @@ describe("--from-chain", () => {
 
     const [impl, opts] = vi.mocked(resolveImplementationLayout).mock.calls[0];
     expect(impl).toBe(IMPL);
-    expect(opts).toMatchObject({
-      explorer: { apiKey: "KEY", apiUrl: "https://x" },
-      refresh: true,
+    expect(opts.refresh).toBe(true);
+    expect(await (opts.explorer as () => Promise<unknown>)()).toEqual({
+      apiKey: "KEY",
+      apiUrl: "https://x",
     });
     expect(vi.mocked(getContractBuildData)).not.toHaveBeenCalled();
   });
@@ -515,8 +569,9 @@ describe("network override", () => {
       implementations: { [PROXY]: IMPL },
     });
     const hre = makeHre(chain);
+    hre.globalOptions.network = "mainnet";
 
-    await recordBaselineAction({ ...baseArgs, network: "mainnet" }, hre as never);
+    await recordBaselineAction(baseArgs, hre as never);
 
     expect(hre.network.create).toHaveBeenCalledWith("mainnet");
     expect(await readRecord(IMPL)).toBeUndefined(); // localhost untouched

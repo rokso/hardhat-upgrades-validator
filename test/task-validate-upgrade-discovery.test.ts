@@ -18,13 +18,14 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/plugin/internals/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
 import validateUpgradeAction from "../src/plugin/tasks/validate-upgrade.js";
 import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
-import { readProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
+import { readProxyEntry, readScanMarker, writeLayoutRecord } from "../src/core/onchain/store.js";
 import { codeSha256 } from "../src/core/onchain/implementation.js";
 import { makeMockChain } from "./helpers/mock-chain.js";
 
@@ -92,7 +93,6 @@ const args = (over: Record<string, unknown>) => ({
   unsafeAllow: "",
   unsafeSkipStorageCheck: false,
   proxyKind: "",
-  network: "mainnet",
   ...over,
 });
 
@@ -161,6 +161,19 @@ describe("validate-upgrade --all", () => {
     expect(logs.join("\n")).toMatch(/as of block 100/);
   });
 
+  it("offline: fails an indexed proxy whose implementation has no record, instead of skipping it", async () => {
+    await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
+    await rm(join(deploymentsDir, ".storage-layouts", "implementations"), { recursive: true });
+    logs = [];
+
+    await validateUpgradeAction(args({ all: true }), makeHre(undefined) as never);
+
+    expect(logs.join("\n")).toMatch(
+      /\[ERROR\] "mainnet\/Box": No baseline for "Box": no layout record for 0x0+bb/,
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
   it("offline without an index finds nothing to validate", async () => {
     await validateUpgradeAction(args({ all: true }), makeHre(undefined) as never);
 
@@ -187,6 +200,67 @@ describe("validate-upgrade --all discovery errors", () => {
 
     expect(validated()).toEqual(["src/Box.sol:Box"]);
     expect(logs.join("\n")).toMatch(/\[ERROR\] "mainnet" 0x0+dd \("Broken"\)/);
+    expect(process.exitCode).toBe(1);
+    // Not a complete scan, so later deploys keep classifying everything.
+    expect(await readScanMarker(join(deploymentsDir, ".storage-layouts"))).toBeUndefined();
+  });
+});
+
+describe("validate-upgrade without the new layout", () => {
+  it("fails a proxy whose new layout is missing, instead of skipping it", async () => {
+    vi.mocked(getContractBuildData).mockResolvedValue({
+      upgradeStorageLayout: undefined,
+      unsafeAllowFromAnnotation: [],
+      perVariableUnsafeAllow: new Map(),
+      namespaceUnsafeAllow: new Map(),
+      safetyErrors: [],
+      proxyKind: undefined,
+    } as never);
+
+    await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
+
+    expect(logs.join("\n")).toMatch(
+      /\[ERROR\] "mainnet\/Box": the validation cache is missing.*hardhat compile/,
+    );
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("validate-upgrade on the wrong chain", () => {
+  // An RPC for another chain: nothing is a proxy there.
+  const otherChain = () => makeMockChain({ chainId: 11155111 });
+
+  it("fails when the RPC's chain differs from the recorded one, instead of finding no proxies", async () => {
+    await writeFile(join(deploymentsDir, ".chain"), JSON.stringify({ chainId: "1" }));
+
+    await validateUpgradeAction(args({ all: true }), makeHre(otherChain()) as never);
+
+    expect(validated()).toEqual([]);
+    expect(logs.join("\n")).toMatch(/\[ERROR\] "mainnet": The RPC answers for chain 11155111/);
+    expect(logs.join("\n")).not.toMatch(/No proxy deployments found/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("fails for a single contract too, before deciding it is not a proxy", async () => {
+    await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
+    logs = [];
+
+    await validateUpgradeAction(args({ contract: "Box" }), makeHre(otherChain()) as never);
+
+    expect(logs.join("\n")).toMatch(/records chain 1/);
+    expect(logs.join("\n")).not.toMatch(/\[SKIP\]/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("reports an indexed proxy the chain no longer shows, even with no chain id recorded elsewhere", async () => {
+    await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
+    logs = [];
+    // Same chain id, but the proxy is gone (say, a node reset under the files).
+    await validateUpgradeAction(args({ all: true }), makeHre(makeMockChain()) as never);
+
+    expect(logs.join("\n")).toMatch(
+      /\[ERROR\] "mainnet" 0x0+aa \("Box"\): the proxy index has it as a proxy running 0x0+bb/,
+    );
     expect(process.exitCode).toBe(1);
   });
 });

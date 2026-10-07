@@ -2,9 +2,12 @@
  * The config hook asks every compiler for the solc outputs validation needs,
  * adding to whatever the user configured rather than replacing it.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { SolidityConfig } from "hardhat/types/config";
-import { requestValidationOutputs } from "../src/plugin/hooks/config.js";
+import {
+  requestValidationOutputs,
+  resolveUpgradesValidatorConfig,
+} from "../src/plugin/hooks/config.js";
 
 const shared = { "*": { "*": ["abi"], "": ["ast"] } };
 
@@ -84,5 +87,36 @@ describe("requestValidationOutputs", () => {
       "storageLayout",
       "devdoc",
     ]);
+  });
+});
+
+describe("resolveUpgradesValidatorConfig", () => {
+  it("resolves a configVariable API key and keeps string keys as written", () => {
+    const resolved = { _type: "ResolvedConfigurationVariable" };
+    const resolve = vi.fn().mockReturnValue(resolved);
+    const variable = { _type: "ConfigurationVariable", name: "KEY" } as const;
+
+    const config = resolveUpgradesValidatorConfig(
+      {
+        networks: ["mainnet"],
+        explorers: { mainnet: { apiKey: variable }, l2: { apiKey: "", apiUrl: "https://x" } },
+      } as never,
+      resolve as never,
+    );
+
+    expect(resolve).toHaveBeenCalledWith(variable);
+    expect(config.explorers).toEqual({
+      mainnet: { apiKey: resolved },
+      l2: { apiKey: "", apiUrl: "https://x" },
+    });
+    expect(config.networks).toEqual(["mainnet"]);
+  });
+
+  it("skips an explorer entry a JS config left undefined", () => {
+    const config = resolveUpgradesValidatorConfig(
+      { explorers: { mainnet: undefined, l2: { apiKey: "K" } } } as never,
+      vi.fn() as never,
+    );
+    expect(config.explorers).toEqual({ l2: { apiKey: "K" } });
   });
 });

@@ -26,18 +26,21 @@ import {
   readDeployments,
   resolveArtifactName,
   resolveDeploymentNetworks,
+  selectedNetwork,
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
 import {
   artifactCodeLookup,
   discoverProxies,
+  lostIndexedProxies,
   updateProxyIndex,
   type DiscoveredProxy,
   type DiscoveryError,
   type LocalCodeLookup,
 } from "../internals/proxy-discovery.js";
-import { loadValidationsFromDisk } from "../internals/validations-cache.js";
+import { loadValidationsFromDisk, missingLayoutReason } from "../internals/validations-cache.js";
 import { explorerConfig, probe } from "../internals/baseline.js";
+import { assertSameChain } from "../internals/chain-identity.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import { recordLocalBuild, resolveImplementationLayout } from "../../core/onchain/baseline.js";
 import { layoutStoreDir, readLayoutRecord } from "../../core/onchain/store.js";
@@ -50,18 +53,17 @@ interface RecordBaselineArgs {
   all: boolean;
   force: boolean;
   fromChain?: boolean;
-  network?: string;
 }
 
 type Outcome = "recorded" | "skipped";
 
 const action: NewTaskActionFunction<RecordBaselineArgs> = async (
-  { contract, all, force, fromChain = false, network },
+  { contract, all, force, fromChain = false },
   hre: HardhatRuntimeEnvironment,
 ) => {
   const projectRoot = hre.config.paths.root;
   const deploymentsBase = resolve(projectRoot, "deployments");
-  const targetNetworks = await resolveDeploymentNetworks(deploymentsBase, network);
+  const targetNetworks = await resolveDeploymentNetworks(deploymentsBase, selectedNetwork(hre));
   if (targetNetworks === null) return;
 
   if (!all && (contract === undefined || contract === "")) {
@@ -107,14 +109,13 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
       try {
         found = await findTargets(
           provider!,
+          deploymentsDir,
           deployments,
           all ? undefined : contract!,
           artifactCodeLookup(hre.artifacts),
         );
       } catch (e) {
-        logger.log(
-          `  [ERROR] "${networkName}": could not discover proxies: ${(e as Error).message}`,
-        );
+        logger.log(`  [ERROR] "${networkName}": ${(e as Error).message}`);
         anyFailed = true;
         continue;
       }
@@ -179,16 +180,22 @@ interface Targets {
 // For a single contract, logs why it is skipped when it is not the code behind a proxy.
 async function findTargets(
   provider: EthProvider,
+  deploymentsDir: string,
   deployments: Map<string, DeploymentFile>,
   contract: string | undefined,
   localCode: LocalCodeLookup,
 ): Promise<Targets> {
+  await assertSameChain(deploymentsDir, provider);
   if (contract === undefined) {
-    const { proxies, errors } = await discoverProxies(provider, deployments, { localCode });
-    const targets = proxies.flatMap((p) =>
+    const discovery = await discoverProxies(provider, deployments, { localCode });
+    const targets = discovery.proxies.flatMap((p) =>
       p.deployments.map((n): [string, DiscoveredProxy] => [n, p]),
     );
-    return { discovered: proxies, targets, errors };
+    const errors = [
+      ...discovery.errors,
+      ...(await lostIndexedProxies(deploymentsDir, deployments, discovery)),
+    ];
+    return { discovered: discovery.proxies, targets, errors };
   }
   const deployment = deployments.get(contract);
   const address = deployment?.address?.toLowerCase();
@@ -240,7 +247,7 @@ async function recordBaseline(
     const { record } = await resolveImplementationLayout(implementation, {
       provider: ctx.provider,
       storeDir,
-      explorer: explorerConfig(hre.config.upgradesValidator, networkName),
+      explorer: () => explorerConfig(hre.config.upgradesValidator, networkName),
       solc: { cacheDir: hre.config.upgradesValidator?.solcCacheDir },
       refresh: ctx.force,
     });
@@ -271,14 +278,7 @@ async function recordBaseline(
     return "skipped";
   }
 
-  if (layout === undefined) {
-    const reason =
-      ctx.validations === undefined
-        ? `validation cache not found. Run \`hardhat compile\` first.`
-        : `contract not in validation cache. Run \`hardhat compile\` to refresh.`;
-    logger.log(`  [SKIP] "${name}": ${reason}`);
-    return "skipped";
-  }
+  if (layout === undefined) throw new Error(missingLayoutReason(ctx.validations));
 
   const { bytecodeMatch, record } = await recordLocalBuild(ctx.provider, storeDir, implementation, {
     contract: `${artifact.sourceName}:${artifact.contractName}`,

@@ -24,6 +24,7 @@ import {
 import { resolveImplementationLayout } from "../src/core/onchain/baseline.js";
 import { BaselineIntegrityError, BaselineUnavailableError } from "../src/core/onchain/errors.js";
 import { updateProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
+import { codeSha256 } from "../src/core/onchain/implementation.js";
 import type { ImplementationLayoutRecord } from "../src/core/onchain/types.js";
 import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 
@@ -191,25 +192,36 @@ describe("resolveBaseline", () => {
     expect(r.layout).toEqual(liveLayout);
   });
 
-  it("offline: an indexed implementation without a record yields no baseline, not the deprecated field", async () => {
+  it("offline: an indexed implementation without a record fails, never using the deprecated field", async () => {
     await indexAt(LIVE);
-    const r = await resolveBaseline(
-      ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
+    await expect(
+      resolveBaseline(
+        ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
+      ),
+    ).rejects.toThrow(
+      new BaselineUnavailableError(
+        `No baseline for "MyContract": no layout record for ${LIVE}, the implementation as of ` +
+          `block 42. Run record-baseline or validate-upgrade with a reachable network.`,
+      ),
     );
-    expect(r.layout).toBeUndefined();
-    expect(r.info.source).toBe("none");
-    expect(r.reason).toMatch(/no layout record for 0x0+bb, the implementation as of block 42/);
+  });
+
+  it("auto: an unreachable RPC with an unrecorded indexed implementation fails, saying why", async () => {
+    await indexAt(LIVE);
+    await expect(resolveBaseline(ctx({ provider: makeDeadChain() }))).rejects.toThrow(
+      /no layout record for 0x0+bb.* The chain was not used: RPC unreachable/,
+    );
   });
 
   it("offline: a file the index does not list for its proxy gets no baseline, not its deprecated field", async () => {
     // e.g. this file describes the proxy contract itself.
     await writeLayoutRecord(storeDir(), record(LIVE, liveLayout));
     await indexAt(LIVE, ["OtherName"]);
-    const r = await resolveBaseline(
-      ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
-    );
-    expect(r.layout).toBeUndefined();
-    expect(r.reason).toMatch(/lists "OtherName"/);
+    await expect(
+      resolveBaseline(
+        ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
+      ),
+    ).rejects.toThrow(/lists "OtherName"/);
   });
 
   it("auto: with no proxy slot on-chain, falls back to the deprecated field, flagged", async () => {
@@ -262,12 +274,36 @@ describe("resolveBaseline", () => {
   });
 });
 
+describe("resolveBaseline chain identity", () => {
+  it("fails when the RPC answers for another chain than the proxy's index entry", async () => {
+    await writeLayoutRecord(storeDir(), record(LIVE, liveLayout));
+    await indexAt(LIVE);
+    // Everything else lines up, so only the chain id can fail it.
+    const code = "0x6080";
+    await writeLayoutRecord(storeDir(), {
+      ...record(LIVE, liveLayout),
+      codeSha256: codeSha256(code),
+    });
+    const other = makeMockChain({
+      chainId: 5,
+      code: { [LIVE]: code },
+      implementations: { [PROXY]: LIVE },
+    });
+    await expect(resolveBaseline(ctx({ provider: other }))).rejects.toThrow(
+      new BaselineIntegrityError(
+        `The RPC answers for chain 5, but the proxy index entry for ${PROXY} records chain 1. ` +
+          `Check that the network's URL points at the chain these deployments are on.`,
+      ),
+    );
+  });
+});
+
 describe("explorerConfig", () => {
-  const withEnvKey = (fn: () => void) => {
+  const withEnvKey = async (fn: () => Promise<void>) => {
     const prev = process.env.ETHERSCAN_API_KEY;
     process.env.ETHERSCAN_API_KEY = "ENVKEY";
     try {
-      fn();
+      await fn();
     } finally {
       if (prev === undefined) delete process.env.ETHERSCAN_API_KEY;
       else process.env.ETHERSCAN_API_KEY = prev;
@@ -275,23 +311,23 @@ describe("explorerConfig", () => {
   };
 
   it("uses ETHERSCAN_API_KEY for Etherscan", () =>
-    withEnvKey(() => {
-      expect(explorerConfig(undefined, "mainnet")).toEqual({ apiKey: "ENVKEY" });
+    withEnvKey(async () => {
+      expect(await explorerConfig(undefined, "mainnet")).toEqual({ apiKey: "ENVKEY" });
       expect(
-        explorerConfig(
+        await explorerConfig(
           { explorers: { mainnet: { apiUrl: "https://api.etherscan.io/v2/api" } } },
           "mainnet",
         ),
       ).toEqual({ apiKey: "ENVKEY", apiUrl: "https://api.etherscan.io/v2/api" });
     }));
 
-  it("treats an empty key as unset, as CI passes for a missing secret", () => {
+  it("treats an empty key as unset, as CI passes for a missing secret", async () => {
     const prev = process.env.ETHERSCAN_API_KEY;
     process.env.ETHERSCAN_API_KEY = "";
     try {
-      expect(explorerConfig(undefined, "mainnet")).toEqual({});
+      expect(await explorerConfig(undefined, "mainnet")).toEqual({});
       expect(
-        explorerConfig({ explorers: { mainnet: { apiKey: "", apiUrl: "" } } }, "mainnet"),
+        await explorerConfig({ explorers: { mainnet: { apiKey: "", apiUrl: "" } } }, "mainnet"),
       ).toEqual({});
     } finally {
       if (prev === undefined) delete process.env.ETHERSCAN_API_KEY;
@@ -300,9 +336,9 @@ describe("explorerConfig", () => {
   });
 
   it("does not send ETHERSCAN_API_KEY over plain http", () =>
-    withEnvKey(() => {
+    withEnvKey(async () => {
       expect(
-        explorerConfig(
+        await explorerConfig(
           { explorers: { mainnet: { apiUrl: "http://api.etherscan.io/v2/api" } } },
           "mainnet",
         ),
@@ -310,19 +346,52 @@ describe("explorerConfig", () => {
     }));
 
   it("never sends ETHERSCAN_API_KEY to a third-party explorer", () =>
-    withEnvKey(() => {
+    withEnvKey(async () => {
       expect(
-        explorerConfig({ explorers: { l2: { apiUrl: "https://blockscout.example/api" } } }, "l2"),
+        await explorerConfig(
+          { explorers: { l2: { apiUrl: "https://blockscout.example/api" } } },
+          "l2",
+        ),
       ).toEqual({ apiUrl: "https://blockscout.example/api" });
     }));
 
   it("uses a key configured for the third-party explorer", () =>
-    withEnvKey(() => {
+    withEnvKey(async () => {
       expect(
-        explorerConfig(
+        await explorerConfig(
           { explorers: { l2: { apiUrl: "https://blockscout.example/api", apiKey: "OWN" } } },
           "l2",
         ),
       ).toEqual({ apiUrl: "https://blockscout.example/api", apiKey: "OWN" });
     }));
+
+  it("reads a configVariable key only when asked, and fails when it cannot be read", async () => {
+    const get = vi.fn().mockResolvedValue("FROMVAR");
+    const key = { _type: "ResolvedConfigurationVariable", get } as never;
+    const config = { explorers: { mainnet: { apiKey: key } } };
+    expect(get).not.toHaveBeenCalled();
+    expect(await explorerConfig(config, "mainnet")).toEqual({ apiKey: "FROMVAR" });
+
+    get.mockRejectedValue(new Error("HHE7: Configuration Variable not found"));
+    await expect(explorerConfig(config, "mainnet")).rejects.toThrow(
+      /Could not read the explorer API key: HHE7/,
+    );
+  });
+
+  it("resolveBaseline leaves reading a configVariable key to the rebuild, if any", async () => {
+    const get = vi.fn().mockResolvedValue("FROMVAR");
+    const config = { explorers: { mainnet: { apiKey: { get } as never } } };
+    vi.mocked(resolveImplementationLayout).mockResolvedValue({
+      implementation: LIVE,
+      record: record(LIVE, liveLayout),
+      origin: "store",
+    });
+
+    await resolveBaseline(ctx({ provider: chain(), config }));
+
+    expect(get).not.toHaveBeenCalled();
+    const { explorer } = vi.mocked(resolveImplementationLayout).mock.calls[0][1];
+    expect(typeof explorer).toBe("function");
+    expect(await (explorer as () => Promise<unknown>)()).toEqual({ apiKey: "FROMVAR" });
+  });
 });

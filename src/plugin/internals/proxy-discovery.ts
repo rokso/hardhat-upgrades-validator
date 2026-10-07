@@ -221,9 +221,13 @@ export async function listProxyDeployments(
 ): Promise<{ names: string[]; errors: DiscoveryError[] }> {
   const deployments = await readDeployments(deploymentsDir);
   if (provider !== undefined) {
-    const { proxies, errors } = await discoverProxies(provider, deployments, { localCode });
-    await updateProxyIndex(deploymentsDir, provider, proxies, errors.length === 0);
-    return { names: proxies.flatMap((p) => p.deployments).sort(), errors };
+    const discovery = await discoverProxies(provider, deployments, { localCode });
+    const errors = [
+      ...discovery.errors,
+      ...(await lostIndexedProxies(deploymentsDir, deployments, discovery)),
+    ];
+    await updateProxyIndex(deploymentsDir, provider, discovery.proxies, errors.length === 0);
+    return { names: discovery.proxies.flatMap((p) => p.deployments).sort(), errors };
   }
 
   const names = new Set<string>();
@@ -241,6 +245,42 @@ export async function listProxyDeployments(
     }
   }
   return { names: [...names].sort(), errors: [] };
+}
+
+/**
+ * Indexed proxies a full discovery no longer finds as proxies with code
+ * behind them, while a deployment still sits at their address. Reported as
+ * errors, never dropped: a proxy does not stop being one, so this usually
+ * means the RPC answers for another chain or the files changed under it.
+ */
+export async function lostIndexedProxies(
+  deploymentsDir: string,
+  deployments: Map<string, DeploymentFile>,
+  discovery: Discovery,
+): Promise<DiscoveryError[]> {
+  const addresses = new Set(
+    [...deployments.values()].map((d) => d.address?.toLowerCase()).filter((a) => a !== undefined),
+  );
+  const accounted = new Set([
+    ...discovery.proxies.map((p) => p.proxy),
+    ...discovery.errors.map((e) => e.address),
+  ]);
+  const lost: DiscoveryError[] = [];
+  for (const entry of await listProxyEntries(layoutStoreDir(deploymentsDir))) {
+    if (!addresses.has(entry.proxy) || accounted.has(entry.proxy)) continue;
+    const was = `the proxy index has it as a proxy running ${entry.implementation} as of block ${entry.observedAtBlock}`;
+    lost.push({
+      address: entry.proxy,
+      deployments: entry.deployments,
+      reason: discovery.unvalidated.includes(entry.proxy)
+        ? `${was}, but no deployment describes the code behind it now. Restore that deployment ` +
+          `file; if the proxy is no longer validated on purpose, delete its entry under ` +
+          `.storage-layouts/proxies/.`
+        : `${was}, but the chain shows no proxy there now. Check that the RPC points at the right ` +
+          `chain; if the proxy is really gone, delete its entry under .storage-layouts/proxies/.`,
+    });
+  }
+  return lost;
 }
 
 /**

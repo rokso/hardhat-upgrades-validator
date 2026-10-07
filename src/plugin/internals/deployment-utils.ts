@@ -343,6 +343,15 @@ import { listSubdirsOrEmpty } from "../../utils/io.js";
  * - Otherwise scans `deploymentsBase` for subdirectories.
  * - Returns `null` (and logs a message) when no networks are found.
  */
+/**
+ * Hardhat's global `--network` option, trimmed; undefined when not passed.
+ * It is a global option, so it never reaches a task's own arguments.
+ */
+export function selectedNetwork(hre: { globalOptions: { network?: string } }): string | undefined {
+  const network = (hre.globalOptions.network as string | undefined)?.trim();
+  return network === undefined || network === "" ? undefined : network;
+}
+
 export async function resolveDeploymentNetworks(
   deploymentsBase: string,
   network: string | undefined,

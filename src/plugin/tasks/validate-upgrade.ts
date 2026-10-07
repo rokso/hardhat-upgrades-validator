@@ -22,10 +22,12 @@ import {
   type ProxyKind,
   resolveArtifactName,
   resolveDeploymentNetworks,
+  selectedNetwork,
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
-import { loadValidationsFromDisk } from "../internals/validations-cache.js";
+import { loadValidationsFromDisk, missingLayoutReason } from "../internals/validations-cache.js";
 import { probe, resolveBaseline } from "../internals/baseline.js";
+import { assertSameChain } from "../internals/chain-identity.js";
 import {
   artifactCodeLookup,
   classifyDeployment,
@@ -46,7 +48,6 @@ interface ValidateUpgradeArgs {
   unsafeSkipStorageCheck: boolean;
   proxyKind: string;
   baseline?: string;
-  network?: string;
 }
 
 interface RunOptions {
@@ -57,7 +58,7 @@ interface RunOptions {
 }
 
 const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
-  { contract, all, unsafeAllow, unsafeSkipStorageCheck, proxyKind, baseline, network },
+  { contract, all, unsafeAllow, unsafeSkipStorageCheck, proxyKind, baseline },
   hre: HardhatRuntimeEnvironment,
 ) => {
   const cliUnsafeAllow: UnsafeAllowKind[] = unsafeAllow
@@ -92,7 +93,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
 
   const projectRoot = hre.config.paths.root;
   const deploymentsBase = resolve(projectRoot, "deployments");
-  const targetNetworks = await resolveDeploymentNetworks(deploymentsBase, network);
+  const targetNetworks = await resolveDeploymentNetworks(deploymentsBase, selectedNetwork(hre));
   if (targetNetworks === null) return;
 
   let hasErrors = false;
@@ -118,6 +119,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
       let contractNames: string[];
       let undiscovered = 0;
       try {
+        if (chain !== undefined) await assertSameChain(deploymentsDir, chain);
         if (all) {
           const listed = await listProxyDeployments(deploymentsDir, chain, localCode);
           contractNames = listed.names;
@@ -132,9 +134,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
           contractNames = [contract!];
         }
       } catch (e) {
-        logger.log(
-          `  [ERROR] "${networkName}": could not discover proxies: ${(e as Error).message}`,
-        );
+        logger.log(`  [ERROR] "${networkName}": ${(e as Error).message}`);
         hasErrors = true;
         continue;
       }
@@ -238,10 +238,8 @@ async function validateContract(
 
   if (baseline.layout === undefined && deployment !== null) {
     logger.log(
-      baseline.reason !== undefined
-        ? `  [SKIP] "${name}": no baseline: ${baseline.reason}`
-        : `  [SKIP] "${name}": no baseline. The chain could not supply one and no offline record exists. ` +
-            `Run validate-upgrade with a reachable network, or record-baseline.`,
+      `  [SKIP] "${name}": no baseline. The chain could not supply one and no offline record exists. ` +
+        `Run validate-upgrade with a reachable network, or record-baseline.`,
     );
     for (const w of baseline.warnings) {
       if (w.kind === "chain-baseline-unavailable") logger.log(`         reason: ${w.reason}`);
@@ -277,14 +275,8 @@ async function validateContract(
     return null;
   }
 
-  if (upgradeStorageLayout === undefined) {
-    const reason =
-      validations === undefined
-        ? `validation cache not found. Run \`hardhat compile\` first.`
-        : `contract not in validation cache. Run \`hardhat compile\` to refresh.`;
-    logger.log(`  [SKIP] "${name}": ${reason}`);
-    return null;
-  }
+  // The new side cannot be checked: an error, never a pass.
+  if (upgradeStorageLayout === undefined) throw new Error(missingLayoutReason(validations));
 
   const unsafeAllow = [...opts.cliUnsafeAllow, ...unsafeAllowFromAnnotation];
   const result = validateStorageUpgrade(name, baseline.layout, upgradeStorageLayout, {

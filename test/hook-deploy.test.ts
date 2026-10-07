@@ -31,11 +31,13 @@ vi.mock("../src/plugin/hooks/compile.js", () => ({
   getInMemoryValidations: vi.fn().mockReturnValue(null),
 }));
 
-vi.mock("../src/plugin/internals/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
 import deployOverride from "../src/plugin/hooks/deploy.js";
+import { updateProxyEntry } from "../src/core/onchain/store.js";
 import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
 import { makeDeadChain, makeMockChain, type MockChainState } from "./helpers/mock-chain.js";
 
@@ -117,7 +119,7 @@ const readIndex = (dir: string, address: string) => readStore(dir, "proxies", ad
 
 function makeHre(provider: { send: unknown } | undefined, type = "http") {
   return {
-    globalOptions: { network: "localhost" },
+    globalOptions: { network: "localhost" as string | undefined },
     config: { paths: { root: tmpDir, cache: join(tmpDir, "cache") } },
     artifacts: {
       readArtifact: vi.fn().mockImplementation(async (name: string) => {
@@ -329,6 +331,24 @@ describe("full scan marker", () => {
     expect(touched.every((a) => a === OTHER)).toBe(true);
   });
 
+  it("does not mark the scan complete when an indexed proxy is no longer found", async () => {
+    // Indexed by an earlier single-contract run, which does not mark a scan.
+    await writeDeployments(deploymentsDir, proxyFiles(IMPL));
+    await updateProxyEntry(join(deploymentsDir, ".storage-layouts"), {
+      format: 1,
+      proxy: PROXY,
+      chainId: 1,
+      implementation: IMPL,
+      deployments: ["MyContract"],
+      observedAtBlock: 1,
+    });
+    const gone = makeMockChain({ code: { [IMPL]: DEPLOYED, [OTHER]: DEPLOYED } }); // no slot at PROXY
+
+    await deployOverride({}, makeHre(gone) as never, deploying({ S: standalone(1) }));
+
+    expect(await readStore(deploymentsDir, "", "scan")).toBeUndefined();
+  });
+
   it("does not mark the scan complete when an address failed", async () => {
     const state = chainState(IMPL);
     state.beacons = { [OTHER]: "0x00000000000000000000000000000000000000ee" }; // reverts
@@ -389,6 +409,29 @@ describe("what gets recorded", () => {
 });
 
 describe("failure handling", () => {
+  it("still deploys when reading the deployment files before it fails", async () => {
+    // A directory where a deployment file should be: hashing it throws.
+    await mkdir(join(deploymentsDir, "Broken.json"));
+    const run = deploying(proxyFiles(IMPL));
+
+    const result = await deployOverride({}, makeHre(liveChain()) as never, run);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(result).toBe("deploy-result");
+  });
+
+  it("deploys without --network, whose value Hardhat leaves undefined, and records nothing", async () => {
+    const hre = makeHre(liveChain());
+    hre.globalOptions.network = undefined;
+    const run = deploying(proxyFiles(IMPL));
+
+    const result = await deployOverride({}, hre as never, run);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(result).toBe("deploy-result");
+    expect(hre.network.create).not.toHaveBeenCalled();
+  });
+
   it("skips recording when no RPC is reachable, without failing the deploy", async () => {
     const result = await deployOverride(
       {},
@@ -422,6 +465,22 @@ describe("failure handling", () => {
     expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
     expect(await readIndex(deploymentsDir, PROXY)).toBeUndefined();
     expect(chain.send).not.toHaveBeenCalled();
+  });
+
+  it("skips recording when the RPC answers for another chain than the deployments", async () => {
+    await writeFile(join(deploymentsDir, ".chain"), JSON.stringify({ chainId: "5" }));
+    const warn = vi.mocked(console.warn);
+
+    const result = await deployOverride(
+      {},
+      makeHre(liveChain()) as never,
+      deploying(proxyFiles(IMPL)),
+    );
+
+    expect(result).toBe("deploy-result");
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+    expect(await readIndex(deploymentsDir, PROXY)).toBeUndefined();
+    expect(warn.mock.calls.flat().join("\n")).toMatch(/answers for chain 1/);
   });
 
   it("skips in-process networks, whose fresh chain cannot hold what was deployed", async () => {

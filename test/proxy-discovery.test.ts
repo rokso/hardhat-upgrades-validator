@@ -269,8 +269,9 @@ describe("listProxyDeployments", () => {
   });
 
   it("online: a failed index write is a warning, not a failed discovery", async () => {
-    await mkdir(join(storeDir(), "proxies"), { recursive: true });
-    await writeFile(join(storeDir(), "proxies", `${PROXY}.json`), JSON.stringify({ format: 2 }));
+    // A file where the index directory should be: every write fails.
+    await mkdir(storeDir(), { recursive: true });
+    await writeFile(join(storeDir(), "proxies"), "");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { names } = await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
@@ -300,6 +301,51 @@ describe("listProxyDeployments", () => {
   it("offline with no index lists nothing but deprecated-field files", async () => {
     expect((await listProxyDeployments(deploymentsDir)).names).toEqual([]);
     expect(await listProxyEntries(storeDir())).toEqual([]);
+  });
+});
+
+describe("indexed proxies the chain no longer shows", () => {
+  // The index knows PROXY, from an earlier run.
+  beforeEach(async () => {
+    await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  const noSlot = (): MockChainState => ({ ...chainState(), implementations: {} });
+
+  it("reports one whose slot is gone as an error", async () => {
+    const { names, errors } = await listProxyDeployments(deploymentsDir, makeMockChain(noSlot()));
+    expect(names).toEqual([]);
+    expect(errors).toEqual([
+      expect.objectContaining({
+        address: PROXY,
+        reason: expect.stringMatching(/the chain shows no proxy there now/),
+      }),
+    ]);
+  });
+
+  it("names the missing file when only the proxy contract's own file is left", async () => {
+    await rm(join(deploymentsDir, "Box.json"));
+    const { errors } = await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
+    expect(errors).toEqual([
+      expect.objectContaining({
+        address: PROXY,
+        reason: expect.stringMatching(/no deployment describes the code behind it now/),
+      }),
+    ]);
+  });
+
+  it("ignores one whose deployment files were removed", async () => {
+    await rm(join(deploymentsDir, "Box.json"));
+    await rm(join(deploymentsDir, "Box_Proxy.json"));
+    const { errors } = await listProxyDeployments(deploymentsDir, makeMockChain(noSlot()));
+    expect(errors).toEqual([]);
+  });
+
+  it("does not report an address twice when reading it failed", async () => {
+    const state = { ...noSlot(), beacons: { [PROXY]: BEACON } }; // implementation() reverts
+    const { errors } = await listProxyDeployments(deploymentsDir, makeMockChain(state));
+    expect(errors.map((e) => e.address)).toEqual([PROXY]);
+    expect(errors[0].reason).not.toMatch(/proxy index/);
   });
 });
 

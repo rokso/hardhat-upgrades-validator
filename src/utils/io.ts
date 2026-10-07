@@ -1,8 +1,13 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 
 export async function readJsonFile<T>(filePath: string): Promise<T> {
   const raw = await readFile(filePath, "utf8");
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    throw new Error(`${filePath} is not valid JSON: ${(err as Error).message}`, { cause: err });
+  }
 }
 
 export async function tryReadJsonFile<T>(filePath: string): Promise<T | undefined> {
@@ -21,7 +26,18 @@ export async function writeJsonFile(
 ): Promise<void> {
   const text = opts.pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
   const withNewline = opts.trailingNewline ? text + "\n" : text;
-  await writeFile(filePath, withNewline, "utf8");
+  // Written beside the target and renamed over it, so a crash never leaves a
+  // truncated file behind.
+  // Unique per write: concurrent writes of the same file in one process must
+  // not share a temporary file.
+  const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, withNewline, "utf8");
+    await rename(tmp, filePath);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
 }
 
 export async function listDirOrEmpty(path: string): Promise<string[]> {

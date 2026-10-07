@@ -29,14 +29,17 @@ import {
   resolveArtifactName,
   getContractBuildData,
   createBuildInfoOutputCache,
+  selectedNetwork,
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
 import { getInMemoryValidations } from "./compile.js";
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
 import { probe } from "../internals/baseline.js";
+import { assertSameChain } from "../internals/chain-identity.js";
 import {
   artifactCodeLookup,
   discoverProxies,
+  lostIndexedProxies,
   updateProxyIndex,
 } from "../internals/proxy-discovery.js";
 import { recordLocalBuild } from "../../core/onchain/baseline.js";
@@ -56,11 +59,15 @@ export default async function deployOverride(
   hre: HardhatRuntimeEnvironment,
   runSuper: (args: TaskArguments) => Promise<unknown>,
 ): Promise<unknown> {
-  const deploymentsDir = targetDeploymentsDir(hre);
-  const before =
-    deploymentsDir === undefined
-      ? undefined
-      : await hashDeploymentFiles(deploymentsDir).catch(() => undefined);
+  // Nothing before the deploy may fail it either.
+  let deploymentsDir: string | undefined;
+  let before: Map<string, string> | undefined;
+  try {
+    deploymentsDir = targetDeploymentsDir(hre);
+    if (deploymentsDir !== undefined) before = await hashDeploymentFiles(deploymentsDir);
+  } catch {
+    before = undefined;
+  }
   const result = await runSuper(args);
   // Recording is a side benefit: nothing here may fail a deploy that already succeeded.
   if (deploymentsDir !== undefined && before !== undefined) {
@@ -74,10 +81,11 @@ export default async function deployOverride(
 }
 
 // We only mutate one deployment network at a time, using Hardhat's global
-// `--network` option from HRE.
+// `--network` option from HRE. Undefined at runtime when it is not passed,
+// whatever its type says.
 function targetDeploymentsDir(hre: HardhatRuntimeEnvironment): string | undefined {
-  const network = hre.globalOptions.network.trim();
-  if (network === "") return undefined;
+  const network = selectedNetwork(hre);
+  if (network === undefined) return undefined;
   return resolve(hre.config.paths.root, "deployments", network);
 }
 
@@ -90,7 +98,7 @@ async function recordImplementationLayouts(
   const changed = new Set([...after].filter(([n, h]) => before.get(n) !== h).map(([n]) => n));
   if (changed.size === 0) return;
 
-  const network = hre.globalOptions.network.trim();
+  const network = selectedNetwork(hre);
   // hardhat-deploy's fork mode deploys onto a fork of `network`: what it
   // deployed exists only on the fork, so nothing may be recorded for the real
   // network. (Recent versions do not save deployments there at all.)
@@ -122,6 +130,13 @@ async function recordImplementationLayouts(
       return;
     }
 
+    try {
+      await assertSameChain(deploymentsDir, provider);
+    } catch (e) {
+      logger.warn(`Skipped recording implementation layouts: ${(e as Error).message}`);
+      return;
+    }
+
     const deployments = await readDeployments(deploymentsDir);
     const changedAddresses = new Set<string>();
     for (const name of changed) {
@@ -134,10 +149,17 @@ async function recordImplementationLayouts(
     // implementation can be told apart from an unrelated contract.
     const storeDir = layoutStoreDir(deploymentsDir);
     const bootstrap = (await readScanMarker(storeDir)) === undefined;
-    const { proxies: discovered, errors } = await discoverProxies(provider, deployments, {
+    const discovery = await discoverProxies(provider, deployments, {
       ...(bootstrap ? {} : { only: changedAddresses }),
       localCode: artifactCodeLookup(hre.artifacts),
     });
+    const discovered = discovery.proxies;
+    // A full scan also reports indexed proxies it no longer finds, which
+    // must keep the scan from counting as complete.
+    const errors = [
+      ...discovery.errors,
+      ...(bootstrap ? await lostIndexedProxies(deploymentsDir, deployments, discovery) : []),
+    ];
     for (const e of errors) {
       logger.warn(`Could not classify ${e.address} (${e.deployments.join(", ")}): ${e.reason}`);
     }

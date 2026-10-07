@@ -1,7 +1,7 @@
 /**
  * Conditionally-loaded mini-plugin that overrides hardhat-deploy's "deploy"
- * task to write `upgradeStorageLayout` into deployment JSON files after each
- * deployment run.
+ * task to record, after each deployment run, the layout of the implementation
+ * each changed proxy runs and refresh the proxy index (see hooks/deploy.ts).
  *
  * This plugin is only loaded when hardhat-deploy is present (via
  * `conditionalDependencies` in the main plugin). If hardhat-deploy is not

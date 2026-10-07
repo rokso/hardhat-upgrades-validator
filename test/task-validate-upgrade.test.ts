@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 // ---------------------------------------------------------------------------
@@ -23,10 +23,6 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
     readDeployment: vi.fn(),
   };
 });
-
-vi.mock("../src/plugin/validations-cache.js", () => ({
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
-}));
 
 vi.mock("../src/plugin/internals/proxy-discovery.js", () => ({
   listProxyDeployments: vi.fn(),
@@ -57,7 +53,7 @@ import { validateStorageUpgrade } from "../src/core/validator.js";
 
 function makeHre(root: string) {
   return {
-    globalOptions: { network: "localhost" },
+    globalOptions: { network: "localhost" as string | undefined },
     config: { paths: { root, cache: join(root, "cache") } },
     network: {
       create: vi.fn().mockImplementation(() => Promise.reject(new Error("no network"))),
@@ -111,7 +107,6 @@ describe("argument validation", () => {
           unsafeAllow: "",
           unsafeSkipStorageCheck: false,
           proxyKind: "",
-          network: "localhost",
         },
         hre as never,
       ),
@@ -128,7 +123,6 @@ describe("argument validation", () => {
           unsafeAllow: "",
           unsafeSkipStorageCheck: false,
           proxyKind: "",
-          network: "localhost",
         },
         hre as never,
       ),
@@ -146,7 +140,6 @@ describe("argument validation", () => {
           unsafeAllow: "",
           unsafeSkipStorageCheck: false,
           proxyKind: "",
-          network: "localhost",
         },
         hre as never,
       ),
@@ -174,7 +167,6 @@ describe("unsafeAllow token parsing", () => {
         unsafeAllow: "variable-renamed type-changed",
         unsafeSkipStorageCheck: false,
         proxyKind: "",
-        network: "localhost",
       },
       hre as never,
     );
@@ -193,7 +185,6 @@ describe("unsafeAllow token parsing", () => {
         unsafeAllow: "variable-renamed unknown-kind",
         unsafeSkipStorageCheck: false,
         proxyKind: "",
-        network: "localhost",
       },
       hre as never,
     );
@@ -214,7 +205,6 @@ describe("unsafeAllow token parsing", () => {
         unsafeAllow: "",
         unsafeSkipStorageCheck: false,
         proxyKind: "",
-        network: "localhost",
       },
       hre as never,
     );
@@ -233,7 +223,6 @@ describe("unsafeAllow token parsing", () => {
         unsafeAllow: "variable-renamed,type-changed",
         unsafeSkipStorageCheck: false,
         proxyKind: "",
-        network: "localhost",
       },
       hre as never,
     );
@@ -264,7 +253,6 @@ describe("proxyKind override parsing", () => {
         unsafeAllow: "",
         unsafeSkipStorageCheck: false,
         proxyKind: "uups",
-        network: "localhost",
       },
       hre as never,
     );
@@ -281,7 +269,6 @@ describe("proxyKind override parsing", () => {
         unsafeAllow: "",
         unsafeSkipStorageCheck: false,
         proxyKind: "transparent",
-        network: "localhost",
       },
       hre as never,
     );
@@ -299,7 +286,6 @@ describe("proxyKind override parsing", () => {
           unsafeAllow: "",
           unsafeSkipStorageCheck: false,
           proxyKind: "not-a-valid-kind",
-          network: "localhost",
         },
         hre as never,
       ),
@@ -315,7 +301,6 @@ describe("proxyKind override parsing", () => {
         unsafeAllow: "",
         unsafeSkipStorageCheck: false,
         proxyKind: "",
-        network: "localhost",
       },
       hre as never,
     );
@@ -323,8 +308,9 @@ describe("proxyKind override parsing", () => {
     expect(passedProxyKind).toBeUndefined();
   });
 
-  it("uses args.network when provided", async () => {
+  it("reads Hardhat's global --network option", async () => {
     const hre = makeHre(tmpDir);
+    hre.globalOptions.network = "mainnet";
     await validateUpgradeAction(
       {
         contract: undefined,
@@ -332,12 +318,34 @@ describe("proxyKind override parsing", () => {
         unsafeAllow: "",
         unsafeSkipStorageCheck: false,
         proxyKind: "",
-        network: "mainnet",
       },
       hre as never,
     );
 
-    const calledWithDir = vi.mocked(listProxyDeployments).mock.calls[0]?.[0];
-    expect(calledWithDir).toContain(join("deployments", "mainnet"));
+    const dirs = vi.mocked(listProxyDeployments).mock.calls.map(([dir]) => dir);
+    expect(dirs).toEqual([join(tmpDir, "deployments", "mainnet")]);
+  });
+
+  it("without --network, validates every network directory", async () => {
+    await mkdir(join(tmpDir, "deployments", "alpha"), { recursive: true });
+    await mkdir(join(tmpDir, "deployments", "beta"), { recursive: true });
+    const hre = makeHre(tmpDir);
+    hre.globalOptions.network = undefined;
+    await validateUpgradeAction(
+      {
+        contract: undefined,
+        all: true,
+        unsafeAllow: "",
+        unsafeSkipStorageCheck: false,
+        proxyKind: "",
+      },
+      hre as never,
+    );
+
+    const dirs = vi.mocked(listProxyDeployments).mock.calls.map(([dir]) => dir);
+    expect(dirs.sort()).toEqual([
+      join(tmpDir, "deployments", "alpha"),
+      join(tmpDir, "deployments", "beta"),
+    ]);
   });
 });

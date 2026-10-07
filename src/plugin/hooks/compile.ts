@@ -36,7 +36,11 @@ import {
 
 import { resolve } from "node:path";
 
-import { loadValidationsFromDisk, writeValidationsToDisk } from "../internals/validations-cache.js";
+import {
+  loadValidationsFromDisk,
+  removeValidationsFromDisk,
+  writeValidationsToDisk,
+} from "../internals/validations-cache.js";
 
 import { isFullSolcOutput } from "../internals/is-full-solc-output.js";
 
@@ -52,6 +56,7 @@ import {
   resolveArtifactName,
 } from "../internals/deployment-utils.js";
 import { resolveBaseline } from "../internals/baseline.js";
+import { BaselineUnavailableError } from "../../core/onchain/errors.js";
 import { listProxyDeployments } from "../internals/proxy-discovery.js";
 import { listSubdirsOrEmpty } from "../../utils/io.js";
 import { logger } from "../../utils/logger.js";
@@ -62,6 +67,9 @@ import { logger } from "../../utils/logger.js";
 // ---------------------------------------------------------------------------
 
 let inMemoryValidations: ValidationDataCurrent | null = null;
+// Set when a job compiled but could not be validated, so the disk cache would
+// be missing contracts Hardhat will not recompile.
+let incompleteValidations = false;
 
 export function getInMemoryValidations(): ValidationDataCurrent | null {
   return inMemoryValidations;
@@ -180,7 +188,12 @@ async function recordValidations(
     const runData = ozValidate(output, decodeSrc, version, input, namespacedOutput);
     inMemoryValidations = concatRunData(runData, inMemoryValidations ?? undefined);
   } catch (err) {
-    logger.warn(`Safety validation step failed (contract-level checks may be skipped): ${err}`);
+    incompleteValidations = true;
+    logger.warn(
+      `Validation failed for a compilation job: ${err}. Upgrade checks are off until this is ` +
+        `fixed: the validation cache is not saved, so validate-upgrade fails for every proxy, ` +
+        `and every build recompiles everything to retry.`,
+    );
   }
 }
 
@@ -227,52 +240,71 @@ async function buildHandler(
   if (!isCompileHookEnabled(context)) return next(context, rootFilePaths, options);
 
   inMemoryValidations = null;
+  incompleteValidations = false;
+  const cachePath = context.config.paths.cache;
 
   // If the validations cache is missing, force a full recompile so all contracts
   // get a fresh solc invocation and populate the cache. Without this, incremental
   // builds would silently skip unchanged contracts, leaving them out of the cache
   // and causing "layout not found" errors at deploy time.
   // Mirrors the same guard in @openzeppelin/hardhat-upgrades.
-  const cacheExists = await loadValidationsFromDisk(context.config.paths.cache);
-  if (!cacheExists && !options?.force) {
+  const existing = await loadValidationsFromDisk(cachePath);
+  if (!existing && !options?.force) {
     options = { ...options, force: true };
   }
 
+  // Hardhat caches each compilation job before getCompilationJobErrors
+  // validates it, and never recompiles a cached job. So the cache file is
+  // removed for the duration of the build and written back only when every
+  // job that compiled was validated: a build that throws or dies in between
+  // leaves it missing, which forces the full recompile above next time.
+  // Readers treat a missing cache as an error, never as nothing to check.
+  if (existing) await removeValidationsFromDisk(cachePath);
+  // Without an existing cache, only a build of every contract can start one:
+  // a partial one would leave out contracts Hardhat then keeps cached.
+  const canStartCache =
+    existing !== undefined || (await buildsEveryContract(context, rootFilePaths, options));
+
   const result = await next(context, rootFilePaths, options);
 
-  // If fresh compilations ran, merge with the existing disk cache and persist.
-  // Without merging, incremental builds (only changed files recompiled) would
-  // overwrite and lose validations for unchanged contracts. If all jobs were
-  // cache hits (inMemoryValidations is still null), leave the disk file intact.
-  //
-  // Note: concatRunData expects a single ValidationRunData (one solc run), not
-  // a ValidationDataCurrent. We merge two ValidationDataCurrent objects by
-  // concatenating their log arrays directly. Newer entries come first so that
-  // oz-core's lookup (which scans log from the front) finds the latest version.
-  if (inMemoryValidations !== null) {
-    const current: ValidationDataCurrent = inMemoryValidations;
-    const existing = await loadValidationsFromDisk(context.config.paths.cache);
-    if (existing) {
-      inMemoryValidations = {
-        version: current.version,
-        log: [...current.log, ...existing.log],
-      };
-    }
-    await writeValidationsToDisk(context.config.paths.cache, inMemoryValidations).catch(() => {});
+  // Newer entries come first, so oz-core's lookup (which scans the log from
+  // the front) finds the latest version of a contract. ValidationDataCurrent
+  // objects are merged by concatenating their logs: concatRunData takes a
+  // single run.
+  // (Read through the getter: the job handler set it during next().)
+  const fresh = getInMemoryValidations();
+  if (fresh !== null && existing) {
+    inMemoryValidations = { version: fresh.version, log: [...fresh.log, ...existing.log] };
+  }
+  const merged = getInMemoryValidations() ?? existing;
+  if (merged !== undefined && !incompleteValidations && canStartCache) {
+    await writeValidationsToDisk(cachePath, merged).catch((err) =>
+      logger.warn(
+        `Could not save the validation cache (the next build recompiles everything): ${err}`,
+      ),
+    );
   }
 
   const noFailures =
     result instanceof Map &&
     [...result.values()].every((r) => r.type !== FileBuildResultType.BUILD_FAILURE);
 
-  const validations =
-    inMemoryValidations ?? (await loadValidationsFromDisk(context.config.paths.cache));
-
   if (noFailures && (options?.scope ?? "contracts") === "contracts") {
-    await runAutoValidation(context, validations);
+    await runAutoValidation(context, merged);
   }
 
   return result;
+}
+
+async function buildsEveryContract(
+  context: HookContext,
+  rootFilePaths: string[],
+  options: BuildOptions | undefined,
+): Promise<boolean> {
+  if ((options?.scope ?? "contracts") !== "contracts") return false;
+  const built = new Set(rootFilePaths);
+  const all = await context.solidity.getRootFilePaths({ scope: "contracts" });
+  return all.every((p) => built.has(p));
 }
 
 async function runAutoValidation(
@@ -331,13 +363,20 @@ async function runAutoValidation(
           config: context.config.upgradesValidator,
         });
       } catch (err) {
+        // Compiling stays usable offline: a known proxy with no record is
+        // reported here, and fails validate-upgrade and assertProxyUpgrade.
+        if (err instanceof BaselineUnavailableError) {
+          logger.log(`  [SKIP] "${network}/${name}": ${err.message}`);
+          skipped++;
+          continue;
+        }
         logger.error(`Could not read the baseline for "${name}": ${(err as Error).message}`);
         anyErrors = true;
         continue;
       }
       const oldLayout = baseline.layout;
       if (oldLayout === undefined) {
-        logger.log(`  [SKIP] "${network}/${name}": ${baseline.reason ?? "no baseline."}`);
+        logger.log(`  [SKIP] "${network}/${name}": no baseline.`);
         skipped++;
         continue;
       }

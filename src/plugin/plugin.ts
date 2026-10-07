@@ -12,7 +12,7 @@ const validateUpgradeTask = task(
   })
   .addFlag({
     name: "all",
-    description: "Validate all deployed contracts that have a stored storage layout",
+    description: "Validate every proxy (found on the chain, else in the proxy index)",
   })
   .addOption({
     name: "unsafeAllow",
@@ -51,7 +51,7 @@ const recordBaselineTask = task(
   })
   .addFlag({
     name: "all",
-    description: "Record baselines for all deployed contracts",
+    description: "Record the implementation of every proxy found on the chain",
   })
   .addFlag({
     name: "force",

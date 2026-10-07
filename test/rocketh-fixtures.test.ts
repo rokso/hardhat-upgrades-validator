@@ -21,7 +21,8 @@ vi.mock("../src/plugin/hooks/compile.js", () => ({
   getInMemoryValidations: vi.fn().mockReturnValue(null),
 }));
 
-vi.mock("../src/plugin/internals/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
