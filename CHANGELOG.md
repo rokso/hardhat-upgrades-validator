@@ -17,6 +17,7 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 - `record-baseline --from-chain` rebuilds records from verified source for proxies running code the local tree has moved past.
 - New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, usable from plain ESM scripts and other tooling.
 - New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.
+- `@openzeppelin/upgrades-core` 1.46.0 (from 1.45.0-alpha.1). It fixes the ERC-7201 location computed for some namespace ids, which only the check against a contract's `layout at` base slot uses; stored layouts key namespaces by id, so existing records stay valid.
 
 ### Breaking (alpha)
 
