@@ -1,6 +1,6 @@
 /**
- * Framework-agnostic chain-sourced baselines. No Hardhat imports, so Hardhat
- * v2 projects and plain scripts can use it directly:
+ * Framework-agnostic chain-sourced baselines. No Hardhat imports, so plain
+ * ESM scripts and other tooling can use it directly:
  *
  *   import { resolveChainBaseline } from "hardhat-upgrades-validator/onchain";
  */
@@ -12,6 +12,7 @@ export {
   type ChainBaseline,
   type ChainBaselineOptions,
   type LocalBuild,
+  type LocalBuildResult,
 } from "./baseline.js";
 export { BaselineIntegrityError, BaselineUnavailableError } from "./errors.js";
 export {
@@ -32,7 +33,9 @@ export {
 export type { EthProvider, ImplementationLayoutRecord } from "./types.js";
 export {
   compareDeployedBytecode,
+  isProvingMatch,
   type DeployedBytecodeMatch,
+  type ProvingMatch,
   type ImmutableReferences,
 } from "../bytecode-utils.js";
 export { validateStorageUpgrade, formatValidationResult } from "../validator.js";

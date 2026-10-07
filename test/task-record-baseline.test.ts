@@ -190,6 +190,25 @@ describe("local build", () => {
     expect(logs.join("\n")).toMatch(/--from-chain/);
   });
 
+  it("does not record a metadata-only match, which does not prove the layout", async () => {
+    // Same code, different CBOR metadata tail (0xa2 map marker, other hash bytes).
+    const compiled = "0x6080604052" + "00".repeat(32) + "fe" + "a2" + "11".repeat(9) + "000a";
+    const deployed = "0x6080604052" + "ab".repeat(32) + "fe" + "a2" + "22".repeat(9) + "000a";
+    const chain = makeMockChain({ code: { [IMPL]: deployed }, implementations: { [PROXY]: IMPL } });
+    const hre = makeHre(chain);
+    hre.artifacts.readArtifact.mockResolvedValue({
+      contractName: "MyContract",
+      sourceName: "contracts/MyContract.sol",
+      deployedBytecode: compiled,
+      immutableReferences: IMMUTABLES,
+    });
+
+    await recordBaselineAction(baseArgs, hre as never);
+
+    expect(await readRecord(IMPL)).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/does not prove its storage layout/);
+  });
+
   it("--force does not bypass the bytecode proof", async () => {
     const other = "0x6080604052" + "ab".repeat(32) + "ff";
     const chain = makeMockChain({ code: { [IMPL]: other }, implementations: { [PROXY]: IMPL } });

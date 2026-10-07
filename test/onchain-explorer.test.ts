@@ -120,4 +120,55 @@ describe("fetchVerifiedSource", () => {
     expect(err).not.toBeInstanceOf(BaselineUnavailableError);
     expect((err as Error).message).toMatch(/Invalid API Key/);
   });
+
+  it("retries HTTP 429", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, json: async () => ({}) })
+      .mockResolvedValueOnce(okResponse([entry(JSON.stringify(STANDARD))]));
+
+    const pending = fetchVerifiedSource(1, ADDRESS, { apiKey: "KEY" }, fetchImpl);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(pending).resolves.toMatchObject({ contractName: "A" });
+  });
+
+  it("treats outages as unavailable, so auto mode can fall back", async () => {
+    const cases = [
+      vi.fn().mockRejectedValue(new TypeError("fetch failed")),
+      vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) }),
+      vi.fn().mockResolvedValue(errorResponse("Free API access is not supported for this chain")),
+    ];
+    for (const fetchImpl of cases) {
+      await expect(fetchVerifiedSource(1, ADDRESS, { apiKey: "KEY" }, fetchImpl)).rejects.toThrow(
+        BaselineUnavailableError,
+      );
+    }
+  });
+
+  it("is unavailable once rate-limit retries run out", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn().mockResolvedValue(errorResponse("Max rate limit reached"));
+    const pending = fetchVerifiedSource(1, ADDRESS, { apiKey: "KEY" }, fetchImpl).catch(
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await pending).toBeInstanceOf(BaselineUnavailableError);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("queries a keyless custom explorer without an apikey parameter", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okResponse([entry(JSON.stringify(STANDARD))]));
+    await fetchVerifiedSource(1, ADDRESS, { apiUrl: "https://blockscout.example/api" }, fetchImpl);
+    const url = new URL(fetchImpl.mock.calls[0][0] as string);
+    expect(url.searchParams.has("apikey")).toBe(false);
+  });
+
+  it("keeps the API key out of error messages", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    const err = await fetchVerifiedSource(1, ADDRESS, { apiKey: "SECRET123" }, fetchImpl).catch(
+      (e: unknown) => e,
+    );
+    expect((err as Error).message).not.toContain("SECRET123");
+  });
 });

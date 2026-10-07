@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compareDeployedBytecode } from "../src/core/bytecode-utils.js";
+import { compareDeployedBytecode, stripBytecodeMetadata } from "../src/core/bytecode-utils.js";
 
 // 5-byte prefix, 32-byte immutable at byte 5, 1-byte suffix, then CBOR metadata.
 function code(immutable: string, body = "fe", cbor = "aa".repeat(10)) {
@@ -51,5 +51,24 @@ describe("compareDeployedBytecode", () => {
     const compiled = "0x60806040" + placeholder + "fe";
     const live = "0x60806040" + "cd".repeat(20) + "fe";
     expect(compareDeployedBytecode(live, compiled)).toBe("immutables-only");
+  });
+});
+
+describe("stripBytecodeMetadata", () => {
+  it("strips a CBOR map tail", () => {
+    // 0xa2 is a two-entry CBOR map, as solc emits.
+    const full = "0x6080" + "a2" + "00".repeat(9) + "000a";
+    expect(stripBytecodeMetadata(full)).toBe("0x6080");
+  });
+
+  it("leaves code alone when the tail is not CBOR (appendCBOR: false)", () => {
+    const code = "0x6080604052" + "5b".repeat(10) + "000a";
+    expect(stripBytecodeMetadata(code)).toBe(code);
+  });
+
+  it("does not report metadata-only for code that differs in a non-CBOR tail", () => {
+    const a = "0x6080604052" + "5b".repeat(10) + "000a";
+    const b = "0x6080604052" + "5c".repeat(10) + "000a";
+    expect(compareDeployedBytecode(a, b)).toBe("none");
   });
 });

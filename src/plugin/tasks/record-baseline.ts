@@ -204,23 +204,22 @@ async function recordBaseline(
     return "skipped";
   }
 
-  const record = await recordLocalBuild(ctx.provider, storeDir, implementation, {
+  const { bytecodeMatch, record } = await recordLocalBuild(ctx.provider, storeDir, implementation, {
     contract: `${artifact.sourceName}:${artifact.contractName}`,
     layout,
     deployedBytecode: artifact.deployedBytecode,
     immutableReferences: artifact.immutableReferences,
   });
   if (record === undefined) {
+    const why =
+      bytecodeMatch === "metadata-only"
+        ? `matches the code ${implementation} runs only after stripping metadata, which does not prove its storage layout`
+        : `is not the code ${implementation} runs; the source has moved on since it was deployed`;
     logger.log(
-      `  [WARN] "${name}": the local build is not the code ${implementation} runs; the source has moved on since it was deployed.\n` +
+      `  [WARN] "${name}": the local build ${why}.\n` +
         `         Re-run with --from-chain to rebuild its layout from verified source.`,
     );
     return "skipped";
-  }
-  if (record.bytecodeMatch === "metadata-only") {
-    logger.log(
-      `  [WARN] "${name}": matched only after stripping metadata, so the compiler input differed from the deployed build. Check the layout before relying on it.`,
-    );
   }
   logger.log(
     `  [OK]   "${name}": recorded ${implementation} from the local build (${record.bytecodeMatch}).`,

@@ -102,10 +102,9 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
       continue;
     }
 
-    const networkConnection =
-      opts.baseline === "deployment"
-        ? undefined
-        : await hre.network.connect(networkName).catch(() => undefined);
+    // Opened in every mode: proxy detection can fall back to the on-chain
+    // slots even when the baseline itself comes from the deployment file.
+    const networkConnection = await hre.network.connect(networkName).catch(() => undefined);
 
     try {
       for (const name of contractNames) {

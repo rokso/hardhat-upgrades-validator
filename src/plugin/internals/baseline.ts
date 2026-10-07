@@ -2,14 +2,17 @@
  * Picks the "before" layout for one deployment according to the baseline mode.
  *
  * `auto` prefers the chain and falls back to an offline baseline only when the
- * chain cannot answer (`BaselineUnavailableError`). When the chain answers
- * with something untrustworthy (`BaselineIntegrityError`) the error
- * propagates: falling back there would validate against a layout the proxy
- * is not running.
+ * chain cannot say which implementation the proxy runs (no RPC, no proxy slot).
+ * Once the chain has named the implementation, only that implementation's
+ * layout is acceptable: if it cannot be obtained the error propagates, since
+ * any other layout describes code the proxy is known not to run. Integrity
+ * failures (`BaselineIntegrityError`) always propagate.
  */
 
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
-import { resolveChainBaseline } from "../../core/onchain/baseline.js";
+import { resolveImplementationLayout } from "../../core/onchain/baseline.js";
+import { ETHERSCAN_V2_API_URL } from "../../core/onchain/explorer.js";
+import { readImplementation } from "../../core/onchain/implementation.js";
 import { BaselineUnavailableError } from "../../core/onchain/errors.js";
 import { layoutStoreDir, readLayoutRecord } from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
@@ -49,9 +52,19 @@ export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBas
     return offlineBaseline(ctx, []);
   }
 
+  let implementation: string;
   try {
     await probe(ctx.provider);
-    const chain = await resolveChainBaseline(address, {
+    implementation = await readImplementation(ctx.provider, address);
+  } catch (e) {
+    if (!(e instanceof BaselineUnavailableError) || ctx.mode === "chain") throw e;
+    return offlineBaseline(ctx, [
+      { kind: "chain-baseline-unavailable", contractName: ctx.name, reason: e.message },
+    ]);
+  }
+
+  try {
+    const chain = await resolveImplementationLayout(implementation, {
       provider: ctx.provider,
       storeDir: layoutStoreDir(ctx.deploymentsDir),
       explorer: explorerConfig(ctx.config, ctx.networkName),
@@ -68,10 +81,12 @@ export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBas
       warnings: [],
     };
   } catch (e) {
-    if (!(e instanceof BaselineUnavailableError) || ctx.mode === "chain") throw e;
-    return offlineBaseline(ctx, [
-      { kind: "chain-baseline-unavailable", contractName: ctx.name, reason: e.message },
-    ]);
+    if (!(e instanceof BaselineUnavailableError)) throw e;
+    throw new BaselineUnavailableError(
+      `"${ctx.name}" runs implementation ${implementation}, but its layout could not be obtained: ` +
+        `${e.message} No other baseline is used, because only this implementation's layout is ` +
+        `correct. Configure an explorer or run record-baseline --from-chain.`,
+    );
   }
 }
 
@@ -80,10 +95,21 @@ export function explorerConfig(
   networkName: string,
 ): { apiKey?: string; apiUrl?: string } {
   const configured = config?.explorers?.[networkName];
+  // ETHERSCAN_API_KEY goes only to Etherscan, never to a third-party apiUrl.
+  const etherscan = configured?.apiUrl === undefined || isEtherscan(configured.apiUrl);
+  const apiKey = configured?.apiKey ?? (etherscan ? process.env.ETHERSCAN_API_KEY : undefined);
   return {
-    apiKey: configured?.apiKey ?? process.env.ETHERSCAN_API_KEY,
+    ...(apiKey !== undefined ? { apiKey } : {}),
     ...(configured?.apiUrl !== undefined ? { apiUrl: configured.apiUrl } : {}),
   };
+}
+
+function isEtherscan(apiUrl: string): boolean {
+  try {
+    return new URL(apiUrl).host === new URL(ETHERSCAN_V2_API_URL).host;
+  } catch {
+    return false;
+  }
 }
 
 /** Separates "cannot reach the RPC" (fall back) from failures after the chain answered. */

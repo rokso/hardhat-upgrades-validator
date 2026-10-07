@@ -1,5 +1,5 @@
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
-import type { DeployedBytecodeMatch } from "../bytecode-utils.js";
+import type { ProvingMatch } from "../bytecode-utils.js";
 
 export type { EthProvider } from "../proxy-detection.js";
 
@@ -19,7 +19,7 @@ export interface ImplementationLayoutRecord {
   contract: string;
   /** solc long version, when known. */
   compiler?: string;
-  bytecodeMatch: Exclude<DeployedBytecodeMatch, "none">;
+  bytecodeMatch: ProvingMatch;
   /** `explorer`: rebuilt from verified source. `local-compile`: proven against the local build. */
   source: "explorer" | "local-compile";
   recordedAt: string;

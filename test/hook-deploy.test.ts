@@ -204,6 +204,15 @@ describe("implementation layout recording", () => {
     expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
   });
 
+  it("does not fail the deploy when an existing record is malformed", async () => {
+    await mkdir(join(deploymentsDir, ".storage-layouts"));
+    await writeFile(join(deploymentsDir, ".storage-layouts", `${IMPL}.json`), "{ not json");
+
+    const result = await deployOverride({}, makeHre(liveChain()) as never, runSuper());
+
+    expect(result).toBe("deploy-result");
+  });
+
   it("only touches the --network deployment directory", async () => {
     const mainnetDir = join(tmpDir, "deployments", "mainnet");
     await mkdir(mainnetDir, { recursive: true });

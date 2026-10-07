@@ -6,9 +6,11 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 
 - `validate-upgrade` and `assertProxyUpgrade` / `validateProxyUpgrade` read the implementation from the proxy's ERC-1967 slot (or beacon) and validate against its layout. New `--baseline` / `baseline` option: `auto` (default), `chain`, `deployment`. Every result names its baseline.
 - Layout records keyed by implementation address under `deployments/<network>/.storage-layouts/`, bound to the exact runtime code by hash. Missing records are rebuilt from the implementation's verified source (Etherscan v2 or any Etherscan-compatible explorer) after proving the rebuild matches the deployed code.
-- Bytecode comparison masks immutables (`immutables-only`), so UUPS implementations (`UUPSUpgradeable.__self`) match on-chain code.
+- Bytecode comparison masks immutables (`immutables-only`), so UUPS implementations (`UUPSUpgradeable.__self`) match on-chain code. A match only after stripping metadata (`metadata-only`) is reported but never accepted as proof of a layout, and metadata is only stripped when the tail is a CBOR map.
+- Once the chain names a proxy's implementation, only that implementation's layout is used; `auto` never substitutes another implementation's record.
+- Explorer outages, HTTP 429/5xx, unsupported chains and compiler-download failures count as "unavailable"; rejected API keys and checksum failures are hard errors. `ETHERSCAN_API_KEY` is never sent to a non-Etherscan `apiUrl`, and custom explorers may be keyless.
 - `record-baseline --from-chain` rebuilds records from verified source for proxies running code the local tree has moved past.
-- New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, for Hardhat v2 projects and scripts.
+- New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, usable from plain ESM scripts and other tooling.
 - New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.
 
 ### Breaking (alpha)

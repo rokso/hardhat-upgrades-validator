@@ -98,8 +98,9 @@ async function deployedCode(content: string): Promise<string> {
   return "0x" + buf.toString("hex");
 }
 
-function explorerServing(content: string) {
-  const sourceCode = `{${JSON.stringify(input(content))}}`;
+function explorerServing(served: string | SolcInput) {
+  const verified = typeof served === "string" ? input(served) : served;
+  const sourceCode = `{${JSON.stringify(verified)}}`;
   return vi.fn(async () => ({
     ok: true,
     status: 200,
@@ -133,7 +134,7 @@ afterAll(() => {
   vi.unstubAllGlobals();
 });
 
-async function chainBaselineFor(served: string, running: string) {
+async function chainBaselineFor(served: string | SolcInput, running: string) {
   const chain = makeMockChain({
     code: { [IMPL]: await deployedCode(running) },
     implementations: { [PROXY]: IMPL },
@@ -170,6 +171,26 @@ describe("chain baseline end to end", () => {
     const second = await chainBaselineFor(V1, V1);
     expect(second.origin).toBe("store");
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  }, 120_000);
+
+  it("refuses a metadata-only match, which can hide a different layout", async () => {
+    // Box never reads its namespaced struct, so inserting a field changes the
+    // layout but not the code: only the metadata hash differs.
+    const err = await chainBaselineFor(V2_INSERT, V1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BaselineIntegrityError);
+    expect((err as Error).message).toMatch(/only after stripping metadata/);
+  }, 120_000);
+
+  it("picks the strongest match among same-named contracts", async () => {
+    // A decoy Box in an earlier file matches only after stripping metadata.
+    const served = input(V1);
+    served.sources = {
+      "contracts/A.sol": { content: V1 + "\n// decoy\n" },
+      "contracts/Box.sol": { content: V1 },
+    };
+    const { record } = await chainBaselineFor(served, V1);
+    expect(record.contract).toBe("contracts/Box.sol:Box");
+    expect(record.bytecodeMatch).toBe("immutables-only");
   }, 120_000);
 
   it("refuses verified source that does not compile to the deployed code", async () => {

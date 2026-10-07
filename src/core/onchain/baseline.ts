@@ -9,9 +9,14 @@
  */
 
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
-import { compareDeployedBytecode, type ImmutableReferences } from "../bytecode-utils.js";
+import {
+  compareDeployedBytecode,
+  isProvingMatch,
+  type DeployedBytecodeMatch,
+  type ImmutableReferences,
+} from "../bytecode-utils.js";
 import { BaselineIntegrityError, BaselineUnavailableError } from "./errors.js";
-import { fetchVerifiedSource, type ExplorerConfig } from "./explorer.js";
+import { canQueryExplorer, fetchVerifiedSource, type ExplorerConfig } from "./explorer.js";
 import { codeSha256, readChainId, readCode, readImplementation } from "./implementation.js";
 import { reconstructLayout } from "./reconstruct.js";
 import { getSolc, type SolcOptions } from "./solc.js";
@@ -60,12 +65,18 @@ export async function resolveImplementationLayout(
           `that address. If the record was copied from another chain, delete it and re-run.`,
       );
     }
+    if (!isProvingMatch(stored.bytecodeMatch)) {
+      throw new BaselineIntegrityError(
+        `The layout record for ${address} rests on a "${String(stored.bytecodeMatch)}" match, which ` +
+          `does not prove a storage layout. Delete it and re-run.`,
+      );
+    }
     return { implementation: address, record: stored, origin: "store" };
   }
 
-  if (!options.explorer?.apiKey) {
+  if (options.explorer === undefined || !canQueryExplorer(options.explorer)) {
     throw new BaselineUnavailableError(
-      `No layout record for implementation ${address} and no explorer API key to rebuild one.`,
+      `No layout record for implementation ${address} and no explorer configured to rebuild one.`,
     );
   }
 
@@ -99,17 +110,23 @@ export interface LocalBuild {
   immutableReferences?: ImmutableReferences;
 }
 
+export interface LocalBuildResult {
+  bytecodeMatch: DeployedBytecodeMatch;
+  /** Set only when the match proves the layout (`exact` or `immutables-only`). */
+  record?: ImplementationLayoutRecord;
+}
+
 /**
  * Records the layout of a local build for the code at `address`, but only
- * after proving the chain runs that build. Returns `undefined` when the code
- * differs, so a caller can never record a layout for code that is not there.
+ * after proving the chain runs that build. A `metadata-only` or `none` match
+ * records nothing, so a layout is never recorded for code that is not there.
  */
 export async function recordLocalBuild(
   provider: EthProvider,
   storeDir: string,
   address: string,
   build: LocalBuild,
-): Promise<ImplementationLayoutRecord | undefined> {
+): Promise<LocalBuildResult> {
   const lower = address.toLowerCase();
   const code = await readCode(provider, lower);
   const bytecodeMatch = compareDeployedBytecode(
@@ -117,7 +134,7 @@ export async function recordLocalBuild(
     build.deployedBytecode,
     build.immutableReferences,
   );
-  if (bytecodeMatch === "none") return undefined;
+  if (!isProvingMatch(bytecodeMatch)) return { bytecodeMatch };
 
   const record: ImplementationLayoutRecord = {
     format: 1,
@@ -132,5 +149,5 @@ export async function recordLocalBuild(
     layout: build.layout,
   };
   await writeLayoutRecord(storeDir, record);
-  return record;
+  return { bytecodeMatch, record };
 }

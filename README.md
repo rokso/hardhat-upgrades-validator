@@ -76,20 +76,22 @@ For each proxy, the plugin:
 
 Deployed code never changes, so a record keyed by implementation address cannot go stale, and one record serves every proxy that shares the implementation.
 
-| Mode (`--baseline` / `baseline`) | Old layout                                                                                                                                                                         |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto` (default)                 | The chain when reachable. Otherwise the stored record for the implementation named in the deployment file, then the deprecated `upgradeStorageLayout` field, each labeled as such. |
-| `chain`                          | The chain only. Fails when it cannot supply a baseline.                                                                                                                            |
-| `deployment`                     | The deprecated `upgradeStorageLayout` field only (0.1.0-alpha.1 behavior).                                                                                                         |
+| Mode (`--baseline` / `baseline`) | Old layout                                                                                                                                                                                                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto` (default)                 | The chain when reachable. If the chain cannot say which implementation the proxy runs (no RPC, no proxy slot), the stored record for the implementation named in the deployment file, then the deprecated `upgradeStorageLayout` field, each labeled as such. |
+| `chain`                          | The chain only. Fails when it cannot supply a baseline.                                                                                                                                                                                                       |
+| `deployment`                     | The deprecated `upgradeStorageLayout` field only (0.1.0-alpha.1 behavior).                                                                                                                                                                                    |
 
-`auto` only falls back when the chain **cannot answer** (no RPC, unverified source, no explorer key). When the chain answers with something untrustworthy, such as verified source that does not compile to the deployed code, validation fails instead of silently comparing against a layout the proxy is not running. Every result names its baseline:
+`auto` falls back only while the chain **cannot say which implementation the proxy runs**. Once it has named one, only that implementation's layout is acceptable: if no record exists and it cannot be rebuilt (no explorer configured, unverified source, explorer or compiler download unreachable), validation fails rather than compare against another implementation's layout. Untrustworthy answers fail too, such as verified source that does not compile to the deployed code. A match only after stripping metadata is not accepted as proof: variables no code reads, gap sizes and field names never reach the bytecode, so two layouts can share the same code. Every result names its baseline:
 
 ```
   [OK]   "mainnet/MyToken" — storage layout validation passed.
          baseline: chain, implementation 0x5fbd… (immutables-only, stored record)
 ```
 
-The compile hook always runs offline (compiling must not need an RPC), so it uses stored records. `validate-upgrade` and the proxy helpers read the chain.
+The compile hook always runs offline (compiling must not need an RPC), so it uses stored records. `validate-upgrade` and the proxy helpers read the chain, and may write records under `deployments/<network>/.storage-layouts/` and download a compiler the first time they rebuild a layout.
+
+Hardhat 3 gives every `network.connect()` to an in-process (EDR) network a fresh chain. In a deploy script running on such a network, pass the script's own provider (`assertProxyUpgrade(hre, "MyToken", { provider })`) so validation sees the same chain; the deploy hook cannot, and skips recording there.
 
 ## Workflow
 
@@ -212,9 +214,10 @@ upgradesValidator: {
   networks: "all",
 
   // Explorer used to rebuild a chain baseline from verified source, keyed by
-  // network name. apiKey falls back to ETHERSCAN_API_KEY; apiUrl defaults to
-  // Etherscan v2, which covers every chain Etherscan indexes. Set apiUrl for
-  // an Etherscan-compatible explorer (e.g. Blockscout).
+  // network name. apiUrl defaults to Etherscan v2, which covers every chain
+  // Etherscan indexes; set it for an Etherscan-compatible explorer (e.g.
+  // Blockscout). apiKey falls back to ETHERSCAN_API_KEY for Etherscan only:
+  // that key is never sent to another host, and a custom apiUrl may be keyless.
   explorers: {
     mainnet: { apiKey: process.env.ETHERSCAN_API_KEY },
     someL2: { apiUrl: "https://blockscout.example.org/api", apiKey: "..." },
@@ -226,7 +229,7 @@ upgradesValidator: {
 },
 ```
 
-Only standard-json verifications can be rebuilt: flattened and multi-file verifications do not record every compiler setting (`viaIR` among them). Those proxies fall back to an offline baseline in `auto` mode.
+Only standard-json verifications can be rebuilt: flattened and multi-file verifications do not record every compiler setting (`viaIR` among them). For those implementations, record the layout with `record-baseline` from a matching local build.
 
 ## Tasks
 
@@ -412,14 +415,14 @@ One JSON file per implementation address, under `deployments/<network>/.storage-
   "codeSha256": "…", // binds the record to the exact runtime code it was proven against
   "contract": "contracts/MyToken.sol:MyToken",
   "compiler": "0.8.25+commit.b61c2a91",
-  "bytecodeMatch": "immutables-only", // exact | immutables-only | metadata-only
+  "bytecodeMatch": "immutables-only", // exact | immutables-only
   "source": "explorer", // explorer | local-compile
   "recordedAt": "2026-10-07T00:00:00.000Z",
   "layout": { "storage": [...], "types": {...}, "namespaces": {...} }
 }
 ```
 
-A record is used only when the code at its address still hashes to `codeSha256`; a record copied from another chain is rejected rather than trusted.
+A record is used only when the code at its address still hashes to `codeSha256`. A record copied from another chain is therefore rejected when that chain has different code at the address; when the code is identical, so is the layout, and reusing the record is safe.
 
 ### Deprecated: `upgradeStorageLayout`
 
@@ -427,7 +430,7 @@ A record is used only when the code at its address still hashes to `codeSha256`;
 
 ## Using the core without the plugin
 
-The chain-baseline logic has no Hardhat dependency, so Hardhat v2 projects and plain scripts can use it directly:
+The chain-baseline logic has no Hardhat dependency, so plain ESM scripts and other tooling can use it directly:
 
 ```ts
 import {

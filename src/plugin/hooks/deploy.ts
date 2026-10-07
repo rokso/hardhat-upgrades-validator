@@ -39,21 +39,30 @@ export default async function deployOverride(
   runSuper: (args: TaskArguments) => Promise<unknown>,
 ): Promise<unknown> {
   const result = await runSuper(args);
+  // Recording is a side benefit: nothing here may fail a deploy that already succeeded.
+  try {
+    await recordImplementationLayouts(hre);
+  } catch (e) {
+    logger.warn(`Could not record implementation layouts: ${(e as Error).message}`);
+  }
+  return result;
+}
 
+async function recordImplementationLayouts(hre: HardhatRuntimeEnvironment): Promise<void> {
   const projectRoot = hre.config.paths.root;
   const deploymentsBase = resolve(projectRoot, "deployments");
   const targetNetwork = hre.globalOptions.network.trim();
 
   // We only mutate one deployment network at a time, using Hardhat's global
   // `--network` option from HRE.
-  if (targetNetwork === "") return result;
+  if (targetNetwork === "") return;
 
   const networkExists = (await listSubdirsOrEmpty(deploymentsBase)).includes(targetNetwork);
-  if (!networkExists) return result;
+  if (!networkExists) return;
 
   const deploymentsDir = resolve(deploymentsBase, targetNetwork);
   const files = (await listDirOrEmpty(deploymentsDir)).filter((f) => f.endsWith(".json"));
-  if (files.length === 0) return result;
+  if (files.length === 0) return;
 
   // Only implementations some proxy points at are worth a record.
   const implementations = new Set<string>();
@@ -61,7 +70,7 @@ export default async function deployOverride(
     const impl = (await readDeployment(deploymentsDir, file.slice(0, -5)))?.implementation;
     if (impl !== undefined) implementations.add(impl.toLowerCase());
   }
-  if (implementations.size === 0) return result;
+  if (implementations.size === 0) return;
 
   const connection = await hre.network.connect().catch(() => undefined);
   const provider = connection?.provider;
@@ -76,7 +85,7 @@ export default async function deployOverride(
       logger.log(
         `[INFO] No reachable RPC for "${targetNetwork}"; skipped recording implementation layouts.`,
       );
-      return result;
+      return;
     }
 
     const storeDir = layoutStoreDir(deploymentsDir);
@@ -134,6 +143,4 @@ export default async function deployOverride(
   } finally {
     await connection?.close().catch(() => {});
   }
-
-  return result;
 }

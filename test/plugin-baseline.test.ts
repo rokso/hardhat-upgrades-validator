@@ -1,7 +1,10 @@
 /**
  * Baseline mode selection: which layout a deployment is compared against,
- * and which failures may fall back (unavailable) versus must surface
- * (integrity).
+ * and which failures may fall back versus must surface.
+ *
+ * The rule under test: an offline baseline is used only while the chain
+ * cannot say which implementation the proxy runs. Once it has named one,
+ * only that implementation's layout is acceptable.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
@@ -10,27 +13,32 @@ import { tmpdir } from "node:os";
 
 vi.mock("../src/core/onchain/baseline.js", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/core/onchain/baseline.js")>();
-  return { ...orig, resolveChainBaseline: vi.fn() };
+  return { ...orig, resolveImplementationLayout: vi.fn() };
 });
 
-import { resolveBaseline, type BaselineContext } from "../src/plugin/internals/baseline.js";
-import { resolveChainBaseline } from "../src/core/onchain/baseline.js";
+import {
+  explorerConfig,
+  resolveBaseline,
+  type BaselineContext,
+} from "../src/plugin/internals/baseline.js";
+import { resolveImplementationLayout } from "../src/core/onchain/baseline.js";
 import { BaselineIntegrityError, BaselineUnavailableError } from "../src/core/onchain/errors.js";
 import { writeLayoutRecord } from "../src/core/onchain/store.js";
 import type { ImplementationLayoutRecord } from "../src/core/onchain/types.js";
 import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 
 const PROXY = "0x00000000000000000000000000000000000000aa";
-const IMPL = "0x00000000000000000000000000000000000000bb";
+const LIVE = "0x00000000000000000000000000000000000000bb"; // what the proxy runs
+const NEWER = "0x00000000000000000000000000000000000000cc"; // deployed, upgrade pending
 
-const layoutA = { storage: [], types: {}, namespaces: { "erc7201:a": [] } };
-const layoutB = { storage: [], types: {}, namespaces: { "erc7201:b": [] } };
+const liveLayout = { storage: [], types: {}, namespaces: { "erc7201:live": [] } };
+const newerLayout = { storage: [], types: {}, namespaces: { "erc7201:newer": [] } };
 const fieldLayout = { storage: [], types: {}, namespaces: { "erc7201:field": [] } };
 
-function record(layout: object): ImplementationLayoutRecord {
+function record(address: string, layout: object): ImplementationLayoutRecord {
   return {
     format: 1,
-    address: IMPL,
+    address,
     chainId: 1,
     codeSha256: "00",
     contract: "a.sol:A",
@@ -43,11 +51,15 @@ function record(layout: object): ImplementationLayoutRecord {
 
 let tmpDir: string;
 let deploymentsDir: string;
+const storeDir = () => join(deploymentsDir, ".storage-layouts");
+const chain = () => makeMockChain({ implementations: { [PROXY]: LIVE } });
 
 function ctx(overrides: Partial<BaselineContext> = {}): BaselineContext {
   return {
     name: "MyContract",
-    deployment: { address: PROXY, implementation: IMPL },
+    // The deployment file already names the newer implementation: the
+    // queued-upgrade state, where file and chain disagree.
+    deployment: { address: PROXY, implementation: NEWER },
     deploymentsDir,
     networkName: "mainnet",
     mode: "auto",
@@ -75,61 +87,79 @@ describe("resolveBaseline", () => {
     }
   });
 
-  it("auto: uses the chain when reachable", async () => {
-    vi.mocked(resolveChainBaseline).mockResolvedValue({
-      implementation: IMPL,
+  it("auto: uses the layout of the implementation the chain reports", async () => {
+    vi.mocked(resolveImplementationLayout).mockResolvedValue({
+      implementation: LIVE,
       origin: "store",
-      record: record(layoutA),
+      record: record(LIVE, liveLayout),
     });
-    const r = await resolveBaseline(ctx({ provider: makeMockChain() }));
-    expect(r.layout).toEqual(layoutA);
+    const r = await resolveBaseline(ctx({ provider: chain() }));
+
+    expect(vi.mocked(resolveImplementationLayout).mock.calls[0][0]).toBe(LIVE);
+    expect(r.layout).toEqual(liveLayout);
     expect(r.info).toEqual({
       source: "chain",
-      implementation: IMPL,
+      implementation: LIVE,
       bytecodeMatch: "immutables-only",
       origin: "store",
     });
     expect(r.warnings).toEqual([]);
   });
 
-  it("auto: prefers the chain over a stale offline record and the deprecated field", async () => {
-    await writeLayoutRecord(join(deploymentsDir, ".storage-layouts"), record(layoutB));
-    vi.mocked(resolveChainBaseline).mockResolvedValue({
-      implementation: IMPL,
+  it("follows a beacon proxy to its beacon's implementation", async () => {
+    const beacon = "0x00000000000000000000000000000000000000dd";
+    vi.mocked(resolveImplementationLayout).mockResolvedValue({
+      implementation: LIVE,
       origin: "store",
-      record: record(layoutA),
+      record: record(LIVE, liveLayout),
     });
-    const r = await resolveBaseline(
+    const provider = makeMockChain({
+      beacons: { [PROXY]: beacon },
+      beaconImplementations: { [beacon]: LIVE },
+    });
+    await resolveBaseline(ctx({ provider }));
+    expect(vi.mocked(resolveImplementationLayout).mock.calls[0][0]).toBe(LIVE);
+  });
+
+  it("auto: never substitutes another implementation's record once the chain has named one", async () => {
+    // A record exists only for the newer, not-yet-active implementation.
+    await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    vi.mocked(resolveImplementationLayout).mockRejectedValue(
+      new BaselineUnavailableError(`No layout record for implementation ${LIVE}.`),
+    );
+    const err = await resolveBaseline(
       ctx({
-        provider: makeMockChain(),
+        provider: chain(),
         deployment: {
           address: PROXY,
-          implementation: IMPL,
+          implementation: NEWER,
           upgradeStorageLayout: fieldLayout as never,
         },
       }),
-    );
-    expect(r.layout).toEqual(layoutA);
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(BaselineUnavailableError);
+    expect((err as Error).message).toContain(LIVE);
+    expect((err as Error).message).toMatch(/No other baseline is used/);
   });
 
   it("auto: an unreachable RPC falls back to the offline record, with a warning", async () => {
-    await writeLayoutRecord(join(deploymentsDir, ".storage-layouts"), record(layoutB));
+    await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
     const r = await resolveBaseline(ctx({ provider: makeDeadChain() }));
-    expect(r.layout).toEqual(layoutB);
+    expect(r.layout).toEqual(newerLayout);
     expect(r.info.source).toBe("offline-record");
     expect(r.warnings[0]).toMatchObject({ kind: "chain-baseline-unavailable" });
-    expect(vi.mocked(resolveChainBaseline)).not.toHaveBeenCalled();
+    expect(vi.mocked(resolveImplementationLayout)).not.toHaveBeenCalled();
   });
 
   it("auto: no provider means offline without a warning", async () => {
-    await writeLayoutRecord(join(deploymentsDir, ".storage-layouts"), record(layoutB));
+    await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
     const r = await resolveBaseline(ctx());
     expect(r.info.source).toBe("offline-record");
     expect(r.warnings).toEqual([]);
   });
 
-  it("auto: falls back to the deprecated field, flagged", async () => {
-    vi.mocked(resolveChainBaseline).mockRejectedValue(new BaselineUnavailableError("not verified"));
+  it("auto: with no proxy slot on-chain, falls back to the deprecated field, flagged", async () => {
     const r = await resolveBaseline(
       ctx({
         provider: makeMockChain(),
@@ -145,17 +175,17 @@ describe("resolveBaseline", () => {
   });
 
   it("auto: never falls back on an integrity failure", async () => {
-    await writeLayoutRecord(join(deploymentsDir, ".storage-layouts"), record(layoutB));
-    vi.mocked(resolveChainBaseline).mockRejectedValue(
+    await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
+    vi.mocked(resolveImplementationLayout).mockRejectedValue(
       new BaselineIntegrityError("does not compile to the deployed code"),
     );
-    await expect(resolveBaseline(ctx({ provider: makeMockChain() }))).rejects.toThrow(
+    await expect(resolveBaseline(ctx({ provider: chain() }))).rejects.toThrow(
       BaselineIntegrityError,
     );
   });
 
   it("chain: refuses to fall back when the chain is unavailable", async () => {
-    await writeLayoutRecord(join(deploymentsDir, ".storage-layouts"), record(layoutB));
+    await writeLayoutRecord(storeDir(), record(NEWER, newerLayout));
     await expect(
       resolveBaseline(ctx({ mode: "chain", provider: makeDeadChain() })),
     ).rejects.toThrow(BaselineUnavailableError);
@@ -163,7 +193,7 @@ describe("resolveBaseline", () => {
   });
 
   it("deployment: reads only the deprecated field and never touches the chain", async () => {
-    const provider = makeMockChain();
+    const provider = chain();
     const r = await resolveBaseline(
       ctx({
         mode: "deployment",
@@ -175,34 +205,45 @@ describe("resolveBaseline", () => {
     expect(r.warnings.map((w) => w.kind)).toEqual(["deprecated-baseline"]);
     expect(provider.send).not.toHaveBeenCalled();
   });
+});
 
-  it("passes the per-network explorer config, falling back to ETHERSCAN_API_KEY", async () => {
-    vi.mocked(resolveChainBaseline).mockResolvedValue({
-      implementation: IMPL,
-      origin: "explorer",
-      record: record(layoutA),
-    });
+describe("explorerConfig", () => {
+  const withEnvKey = (fn: () => void) => {
     const prev = process.env.ETHERSCAN_API_KEY;
     process.env.ETHERSCAN_API_KEY = "ENVKEY";
     try {
-      await resolveBaseline(ctx({ provider: makeMockChain() }));
-      expect(vi.mocked(resolveChainBaseline).mock.calls[0][1].explorer).toEqual({
-        apiKey: "ENVKEY",
-      });
-
-      await resolveBaseline(
-        ctx({
-          provider: makeMockChain(),
-          config: { explorers: { mainnet: { apiUrl: "https://x/api" } } },
-        }),
-      );
-      expect(vi.mocked(resolveChainBaseline).mock.calls[1][1].explorer).toEqual({
-        apiKey: "ENVKEY",
-        apiUrl: "https://x/api",
-      });
+      fn();
     } finally {
       if (prev === undefined) delete process.env.ETHERSCAN_API_KEY;
       else process.env.ETHERSCAN_API_KEY = prev;
     }
-  });
+  };
+
+  it("uses ETHERSCAN_API_KEY for Etherscan", () =>
+    withEnvKey(() => {
+      expect(explorerConfig(undefined, "mainnet")).toEqual({ apiKey: "ENVKEY" });
+      expect(
+        explorerConfig(
+          { explorers: { mainnet: { apiUrl: "https://api.etherscan.io/v2/api" } } },
+          "mainnet",
+        ),
+      ).toEqual({ apiKey: "ENVKEY", apiUrl: "https://api.etherscan.io/v2/api" });
+    }));
+
+  it("never sends ETHERSCAN_API_KEY to a third-party explorer", () =>
+    withEnvKey(() => {
+      expect(
+        explorerConfig({ explorers: { l2: { apiUrl: "https://blockscout.example/api" } } }, "l2"),
+      ).toEqual({ apiUrl: "https://blockscout.example/api" });
+    }));
+
+  it("uses a key configured for the third-party explorer", () =>
+    withEnvKey(() => {
+      expect(
+        explorerConfig(
+          { explorers: { l2: { apiUrl: "https://blockscout.example/api", apiKey: "OWN" } } },
+          "l2",
+        ),
+      ).toEqual({ apiUrl: "https://blockscout.example/api", apiKey: "OWN" });
+    }));
 });

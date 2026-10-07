@@ -18,7 +18,7 @@ import {
   type SolcOutput,
   type StorageLayout,
 } from "@openzeppelin/upgrades-core";
-import { compareDeployedBytecode, type DeployedBytecodeMatch } from "../bytecode-utils.js";
+import { compareDeployedBytecode, isProvingMatch, type ProvingMatch } from "../bytecode-utils.js";
 import { BaselineIntegrityError } from "./errors.js";
 import type { VerifiedSource } from "./explorer.js";
 import type { SolcRunner } from "./solc.js";
@@ -27,7 +27,7 @@ export interface ReconstructedLayout {
   /** Fully qualified name, `source.sol:Contract`. */
   contract: string;
   compiler: string;
-  bytecodeMatch: Exclude<DeployedBytecodeMatch, "none">;
+  bytecodeMatch: ProvingMatch;
   layout: StorageLayout;
 }
 
@@ -120,14 +120,17 @@ async function extractLayout(
 /**
  * Finds the compiled contract that matches the deployed code. The verified
  * name narrows the search, but two files may define a contract with the same
- * name, so the bytecode decides.
+ * name, so the bytecode decides, and the strongest match wins. Only a proving
+ * match is accepted: `metadata-only` can hide a different storage layout.
  */
 function proveDeployedCode(
   output: SolcOutput,
   contractName: string,
   onchainCode: string,
-): { contract: string; bytecodeMatch: Exclude<DeployedBytecodeMatch, "none"> } {
+): { contract: string; bytecodeMatch: ProvingMatch } {
   let candidates = 0;
+  let best: { contract: string; bytecodeMatch: ProvingMatch } | undefined;
+  let weakOnly = false;
   for (const [sourcePath, contracts] of Object.entries(output.contracts ?? {})) {
     const compiled = contracts[contractName] as
       | {
@@ -147,15 +150,24 @@ function proveDeployedCode(
       deployed.object,
       deployed.immutableReferences,
     );
-    if (match !== "none")
-      return { contract: `${sourcePath}:${contractName}`, bytecodeMatch: match };
+    if (match === "metadata-only") weakOnly = true;
+    if (!isProvingMatch(match)) continue;
+    if (best === undefined || (match === "exact" && best.bytecodeMatch !== "exact")) {
+      best = { contract: `${sourcePath}:${contractName}`, bytecodeMatch: match };
+    }
   }
+  if (best !== undefined) return best;
 
+  if (candidates === 0) {
+    throw new BaselineIntegrityError(`Verified source has no contract named "${contractName}".`);
+  }
   throw new BaselineIntegrityError(
-    candidates === 0
-      ? `Verified source has no contract named "${contractName}".`
+    weakOnly
+      ? `Verified source for "${contractName}" matches the deployed code only after stripping ` +
+          `metadata, so the compiler input differed. That does not prove the storage layout ` +
+          `(unread variables and gap sizes never reach the bytecode). Refusing to trust it.`
       : `Verified source for "${contractName}" does not compile to the deployed code, ` +
-          `even with immutables masked and metadata stripped. Refusing to trust its layout.`,
+          `even with immutables masked. Refusing to trust its layout.`,
   );
 }
 

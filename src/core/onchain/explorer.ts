@@ -43,7 +43,18 @@ interface SourceCodeEntry {
 }
 
 const RATE_LIMIT = /rate limit/i;
+// Key problems are the user's to fix and must surface; anything else the
+// explorer refuses (unsupported chain, outage) only means it cannot answer.
+const KEY_ERROR = /api.?key/i;
 const MAX_ATTEMPTS = 4;
+
+/**
+ * Etherscan needs a key; a custom Etherscan-compatible endpoint (e.g. a
+ * Blockscout instance) may not.
+ */
+export function canQueryExplorer(config: ExplorerConfig): boolean {
+  return config.apiKey !== undefined || config.apiUrl !== undefined;
+}
 
 export async function fetchVerifiedSource(
   chainId: number,
@@ -51,7 +62,7 @@ export async function fetchVerifiedSource(
   config: ExplorerConfig,
   fetchImpl: FetchLike = fetch,
 ): Promise<VerifiedSource> {
-  if (!config.apiKey) {
+  if (!canQueryExplorer(config)) {
     throw new BaselineUnavailableError(
       `No explorer API key configured for chain ${chainId}; cannot fetch verified source for ${address}.`,
     );
@@ -62,7 +73,7 @@ export async function fetchVerifiedSource(
   url.searchParams.set("module", "contract");
   url.searchParams.set("action", "getsourcecode");
   url.searchParams.set("address", address);
-  url.searchParams.set("apikey", config.apiKey);
+  if (config.apiKey !== undefined) url.searchParams.set("apikey", config.apiKey);
 
   const entry = await requestWithRetry(url.toString(), fetchImpl);
   return parseSourceCodeEntry(entry, address);
@@ -70,8 +81,22 @@ export async function fetchVerifiedSource(
 
 async function requestWithRetry(url: string, fetchImpl: FetchLike): Promise<SourceCodeEntry> {
   for (let attempt = 1; ; attempt++) {
-    const res = await fetchImpl(url);
-    if (!res.ok) throw new Error(`Explorer request failed with HTTP ${res.status}.`);
+    const retry = attempt < MAX_ATTEMPTS;
+    let res: Awaited<ReturnType<FetchLike>>;
+    try {
+      res = await fetchImpl(url);
+    } catch (e) {
+      // Messages never include the URL, which carries the API key.
+      throw new BaselineUnavailableError(`Explorer unreachable: ${(e as Error).message}`);
+    }
+
+    if (res.status === 429 && retry) {
+      await backoff(attempt);
+      continue;
+    }
+    if (!res.ok) {
+      throw new BaselineUnavailableError(`Explorer request failed with HTTP ${res.status}.`);
+    }
     const body = (await res.json()) as ExplorerResponse;
 
     if (body.status === "1" && Array.isArray(body.result) && body.result.length > 0) {
@@ -80,13 +105,17 @@ async function requestWithRetry(url: string, fetchImpl: FetchLike): Promise<Sour
 
     const detail =
       typeof body.result === "string" ? body.result : (body.message ?? "unknown error");
-    if (RATE_LIMIT.test(detail) && attempt < MAX_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    if (RATE_LIMIT.test(detail) && retry) {
+      await backoff(attempt);
       continue;
     }
-    // A bad key or unsupported chain is a configuration error, not a missing baseline.
-    throw new Error(`Explorer rejected the request: ${detail}`);
+    if (KEY_ERROR.test(detail)) throw new Error(`Explorer rejected the API key: ${detail}`);
+    throw new BaselineUnavailableError(`Explorer could not answer: ${detail}`);
   }
+}
+
+function backoff(attempt: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, 1000 * attempt));
 }
 
 /** Exported for tests. */

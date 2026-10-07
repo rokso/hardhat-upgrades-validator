@@ -15,9 +15,15 @@ export function stripBytecodeMetadata(bytecode: string): string {
 
   const metadataLength = buf.readUInt16BE(buf.length - 2);
 
-  if (metadataLength + 2 > buf.length) return bytecode;
+  if (metadataLength === 0 || metadataLength + 2 > buf.length) return bytecode;
 
-  const core = buf.subarray(0, buf.length - 2 - metadataLength);
+  // solc's metadata is a CBOR map (major type 5). Without that marker the
+  // tail is code (e.g. compiled with appendCBOR: false), and stripping it
+  // would hide real differences.
+  const start = buf.length - 2 - metadataLength;
+  if (buf[start] >> 5 !== 5) return bytecode;
+
+  const core = buf.subarray(0, start);
   return "0x" + core.toString("hex");
 }
 
@@ -53,9 +59,18 @@ export type ImmutableReferences = Record<string, ReadonlyArray<{ start: number; 
  *   lands here because `UUPSUpgradeable.__self` is immutable.
  * - `metadata-only`: identical after masking and stripping the CBOR metadata,
  *   so the compiler input was not byte-identical (source hashes or settings).
+ *   NOT proof of storage layout: variables no code reads, gap sizes and field
+ *   names do not reach the bytecode, so different layouts can share code.
  * - `none`: different code.
  */
 export type DeployedBytecodeMatch = "exact" | "immutables-only" | "metadata-only" | "none";
+
+/** The matches that prove a source is the deployed code, and so prove its layout. */
+export type ProvingMatch = "exact" | "immutables-only";
+
+export function isProvingMatch(match: DeployedBytecodeMatch): match is ProvingMatch {
+  return match === "exact" || match === "immutables-only";
+}
 
 // solc leaves `__$<34 hex>$__` (20 bytes) where an external library address is linked.
 const LINK_PLACEHOLDER = /__\$[0-9a-fA-F]{34}\$__/g;
