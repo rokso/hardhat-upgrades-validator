@@ -3,7 +3,7 @@
  *
  * Uses a real temp directory so file I/O is exercised without mocking fs.
  * Fixture validations.json is used as a real ValidationDataCurrent source for
- * roundtrip tests — it must pass isCurrentValidationData().
+ * roundtrip tests: it must pass isCurrentValidationData().
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -30,10 +30,10 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// loadValidationsFromDisk — error paths
+// loadValidationsFromDisk: error paths
 // ---------------------------------------------------------------------------
 
-describe("loadValidationsFromDisk — error paths", () => {
+describe("loadValidationsFromDisk: error paths", () => {
   it("returns undefined when file does not exist", async () => {
     const result = await loadValidationsFromDisk(tmpCacheDir);
     expect(result).toBeUndefined();
@@ -51,7 +51,7 @@ describe("loadValidationsFromDisk — error paths", () => {
   it("returns undefined for valid JSON that fails isCurrentValidationData", async () => {
     const cachePath = validationsCachePath(tmpCacheDir);
     await mkdir(dirname(cachePath), { recursive: true });
-    // Valid JSON but wrong shape — not a ValidationDataCurrent
+    // Valid JSON but wrong shape: not a ValidationDataCurrent
     await writeFile(cachePath, JSON.stringify({ not: "a validation data object" }), "utf8");
 
     const result = await loadValidationsFromDisk(tmpCacheDir);
@@ -69,10 +69,10 @@ describe("loadValidationsFromDisk — error paths", () => {
 });
 
 // ---------------------------------------------------------------------------
-// loadValidationsFromDisk + writeValidationsToDisk — happy path
+// loadValidationsFromDisk + writeValidationsToDisk: happy path
 // ---------------------------------------------------------------------------
 
-describe("loadValidationsFromDisk — happy path roundtrip", () => {
+describe("loadValidationsFromDisk: happy path roundtrip", () => {
   it("reads back the same data that was written", async () => {
     const fixtureData = await loadValidationsFromDisk(FIXTURE_CACHE_DIR);
     expect(fixtureData).toBeDefined();
@@ -81,13 +81,13 @@ describe("loadValidationsFromDisk — happy path roundtrip", () => {
     const readBack = await loadValidationsFromDisk(tmpCacheDir);
 
     expect(readBack).toBeDefined();
-    // Structural equality — same version + same contract set.
+    // Structural equality: same version + same contract set.
     expect(JSON.stringify(readBack)).toBe(JSON.stringify(fixtureData));
   });
 });
 
 // ---------------------------------------------------------------------------
-// writeValidationsToDisk — lifecycle
+// writeValidationsToDisk: lifecycle
 // ---------------------------------------------------------------------------
 
 describe("writeValidationsToDisk", () => {
@@ -102,7 +102,7 @@ describe("writeValidationsToDisk", () => {
     expect(readBack).toBeDefined();
   });
 
-  it("second sequential write succeeds — lock is released after first write", async () => {
+  it("second sequential write succeeds; lock is released after first write", async () => {
     const fixtureData = await loadValidationsFromDisk(FIXTURE_CACHE_DIR);
     expect(fixtureData).toBeDefined();
 

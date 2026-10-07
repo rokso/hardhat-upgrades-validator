@@ -2,12 +2,12 @@
 
 Hardhat v3 plugin that validates storage layout compatibility for upgradeable proxy contracts managed by [hardhat-deploy v2](https://github.com/wighawag/hardhat-deploy).
 
-Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzeppelin-upgrades/tree/master/packages/upgrades-core) — the same engine that backs `@openzeppelin/hardhat-upgrades`.
+Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzeppelin-upgrades/tree/master/packages/upgrades-core), the same engine that backs `@openzeppelin/hardhat-upgrades`.
 
 ## Requirements
 
 - Hardhat **v3**
-- hardhat-deploy **v2** (optional — proxy helper works with any deploy tool)
+- hardhat-deploy **v2** (optional; the proxy helper works with any deploy tool)
 - Node.js **>= 18**
 
 ## Installation
@@ -42,7 +42,7 @@ const config: HardhatUserConfig = {
 
   upgradesValidator: {
     enableCompileHook: true, // default
-    networks: "all", // default — validate every network in deployments/
+    networks: "all", // default: validate every network in deployments/
   },
 };
 
@@ -53,7 +53,7 @@ That's the setup. See [Workflow](#workflow) for the deploy, baseline, and upgrad
 
 ## How it works
 
-The plugin operates through four validation paths — all backed by the same storage-diff engine:
+The plugin operates through four validation paths, all backed by the same storage-diff engine:
 
 | Path                        | When it runs       | What it does                                                                       |
 | --------------------------- | ------------------ | ---------------------------------------------------------------------------------- |
@@ -96,7 +96,7 @@ Runs that can reach the chain (`validate-upgrade --all`, `record-baseline`, the 
 `auto` falls back only while the chain **cannot say which implementation the proxy runs**. Once it has named one, only that implementation's layout is acceptable: if no record exists and it cannot be rebuilt (no explorer configured, unverified source, explorer or compiler download unreachable), validation fails rather than compare against another implementation's layout. Untrustworthy answers fail too, such as verified source that does not compile to the deployed code. A match only after stripping metadata is not accepted as proof: variables no code reads, gap sizes and field names never reach the bytecode, so two layouts can share the same code. Every result names its baseline:
 
 ```
-  [OK]   "mainnet/MyToken" — storage layout validation passed.
+  [OK]   "mainnet/MyToken": storage layout validation passed.
          baseline: chain, implementation 0x5fbd… (immutables-only, stored record)
 ```
 
@@ -126,7 +126,7 @@ export default deployScript(
   async ({ deployViaProxy, namedAccounts }) => {
     const { deployer } = namedAccounts;
 
-    // No baseline yet — this is a no-op on first deploy.
+    // No baseline yet: this is a no-op on first deploy.
     await assertProxyUpgrade(hre, "MyToken");
 
     await deployViaProxy(
@@ -349,7 +349,7 @@ Used in `--unsafe-allow` (validate task) and `unsafeAllow` (proxy helper options
 | `state-variable-assignment` | Contract assigns a value to a state variable at declaration                                                               |
 | `external-library-linking`  | Contract links to an external library                                                                                     |
 
-Prefer NatSpec annotations over `unsafeAllow` where possible — annotations are scoped to the specific variable or contract they apply to, while `unsafeAllow` bypasses the check globally for the entire validation call.
+Prefer NatSpec annotations over `unsafeAllow` where possible: annotations are scoped to the specific variable or contract they apply to, while `unsafeAllow` bypasses the check globally for the entire validation call.
 
 ## NatSpec annotations
 

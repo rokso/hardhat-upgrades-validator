@@ -1,5 +1,5 @@
 /**
- * Unit tests for validateStorageUpgrade — namespace-level unsafe-allow
+ * Unit tests for validateStorageUpgrade: namespace-level unsafe-allow
  * suppression and global vs namespace vs per-variable precedence.
  *
  * Uses synthetic StorageLayout objects (no compiled fixtures required).
@@ -46,7 +46,7 @@ function regularLayout(
  * op.original.contract so that namespaceIdFromOp() can extract the nsId.
  *
  * Note: do NOT set renamedFrom on namespace items when testing rename
- * detection — renamedFrom auto-approves same-contract renames (no op
+ * detection: renamedFrom auto-approves same-contract renames (no op
  * emitted).  Slot-based matching (same slot, different label) is used
  * instead, which does produce a rename op.
  */
@@ -77,7 +77,7 @@ function nsLayout(
 describe("namespace-level variable-renamed suppression", () => {
   const NS = "erc7201:test.v1";
   // Use slot-based rename detection (same slot, different label) rather than
-  // renamedFrom — renamedFrom auto-approves same-contract renames in OZ.
+  // renamedFrom: renamedFrom auto-approves same-contract renames in OZ.
   const oldLayout = nsLayout(NS, [{ label: "value", typeId: "t_uint256" }]);
   const newLayout = nsLayout(NS, [{ label: "renamedValue", typeId: "t_uint256" }]);
 
@@ -117,7 +117,7 @@ describe("namespace-level variable-renamed suppression", () => {
 
 describe("namespace-level type-changed suppression", () => {
   const NS = "erc7201:test.v1";
-  // uint256 → uint128 is a size-changing type change — NOT suppressed by the
+  // uint256 → uint128 is a size-changing type change: NOT suppressed by the
   // same-size layoutchange shortcut, so it reaches our type-changed handling.
   const oldLayout = nsLayout(NS, [{ label: "value", typeId: "t_uint256" }]);
   const newLayout = nsLayout(NS, [{ label: "value", typeId: "t_uint128" }]);
@@ -293,7 +293,7 @@ describe("unsafe-allow precedence: global vs namespace vs per-variable", () => {
 });
 
 // ---------------------------------------------------------------------------
-// In-place upgrade — same contract name (same `contract` field in both layouts)
+// In-place upgrade: same contract name (same `contract` field in both layouts)
 //
 // Simulates the real-world case where a deployed contract is upgraded in-place:
 // the old baseline and the newly compiled layout share the same contract name.

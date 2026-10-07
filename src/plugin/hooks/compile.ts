@@ -121,7 +121,7 @@ async function invokeSolcHandler(
 
   if (!isCompileHookEnabled(context)) return output;
 
-  // Skip partial/cached outputs — only process full solc output (has contracts
+  // Skip partial/cached outputs: only process full solc output (has contracts
   // with bytecode and sources with ASTs). Adapted from @openzeppelin/hardhat-upgrades.
   if (!isFullSolcOutput(toSolcOutput(output))) return output;
 
@@ -166,7 +166,7 @@ async function invokeSolcHandler(
   // --- oz-core safety validation ---
   // Run validate() with full context: handles @custom:oz-upgrades-unsafe-allow
   // annotations, constructor/delegatecall/selfdestruct checks, proxy kind
-  // inference, and namespace layout extraction — all baked into the returned
+  // inference, and namespace layout extraction, all baked into the returned
   // ValidationRunData. Merge into the module-level store so a single
   // validations.json is written at the end of the build (same as hardhat-upgrades).
   try {

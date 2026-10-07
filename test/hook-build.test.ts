@@ -83,7 +83,7 @@ function makeContext() {
   };
 }
 
-/** next() returns a successful empty Map — noFailures = true, scope = "contracts" by default. */
+/** next() returns a successful empty Map: noFailures = true, scope = "contracts" by default. */
 const makeNext = () => vi.fn().mockResolvedValue(new Map());
 
 beforeEach(async () => {
@@ -137,7 +137,7 @@ describe("auto-validation network scan", () => {
   });
 
   it("skips contracts without an upgradeStorageLayout baseline", async () => {
-    // Contract with no baseline — listDeployedContractsWithLayout should skip it
+    // Contract with no baseline: listDeployedContractsWithLayout should skip it
     await writeDeployment("localhost", "NoBaseline", { address: "0x1" });
 
     const hooks = await compileHookFactory();
@@ -147,7 +147,7 @@ describe("auto-validation network scan", () => {
   });
 
   it("does nothing when deployments directory does not exist", async () => {
-    // No deployments/ dir created — should return without error
+    // No deployments/ dir created: should return without error
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
 

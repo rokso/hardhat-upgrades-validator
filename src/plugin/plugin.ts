@@ -23,7 +23,7 @@ const validateUpgradeTask = task(
   .addFlag({
     name: "unsafeSkipStorageCheck",
     description:
-      "Skip all storage layout validation. For emergency use only — emits a loud warning.",
+      "Skip all storage layout validation. For emergency use only; emits a loud warning.",
   })
   .addOption({
     name: "proxyKind",
@@ -70,10 +70,10 @@ const plugin: HardhatPlugin = {
   npmPackage: "hardhat-upgrades-validator",
   // Override hardhat-deploy's "deploy" task only when hardhat-deploy is loaded.
   // If hardhat-deploy is absent, the import rejects and Hardhat silently skips
-  // this override — no error for rocketh / other deploy tool users.
+  // this override; no error for rocketh / other deploy tool users.
   conditionalDependencies: [
     {
-      // @ts-expect-error hardhat-deploy is an optional peer dep — if absent the
+      // @ts-expect-error hardhat-deploy is an optional peer dep; if absent the
       // import rejects at runtime and Hardhat silently skips this override.
       condition: () => [import("hardhat-deploy")],
       plugin: () => import("./deploy-override-plugin.js"),

@@ -4,7 +4,7 @@ const PREFIX = "[hardhat-upgrades-validator]";
 
 /**
  * Colorizes bracket tags embedded in user-facing output lines.
- * Applied in logger.log — NOT in format functions, so thrown error
+ * Applied in logger.log, NOT in format functions, so thrown error
  * messages stay plain text.
  */
 function colorizeInlineTags(msg: string): string {

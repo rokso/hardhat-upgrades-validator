@@ -41,7 +41,7 @@ export type { BuildInfoOutputCache, BuildInfoParsed } from "./build-info-utils.j
  *     → getVersion(unlinkedBytecode, bytecode)
  *     → getStorageLayout(validations, version)
  *
- * This avoids re-parsing build-info files for layout extraction — oz-core
+ * This avoids re-parsing build-info files for layout extraction: oz-core
  * already ran extractStorageLayout (including the namespaced pass) during
  * validate() in the compile hook and baked the result into ValidationData.
  *
@@ -64,7 +64,7 @@ export function parseUnsafeAllowAnnotation(raw: unknown, context?: string): Unsa
 
   if (unknown.length > 0 && context !== undefined) {
     logger.warn(
-      `Unknown unsafe-allow token(s) "${unknown.join(", ")}" on ${context} — ignored.\n` +
+      `Unknown unsafe-allow token(s) "${unknown.join(", ")}" on ${context}: ignored.\n` +
         `  Valid values: ${UNSAFE_ALLOW_KINDS.join(", ")}`,
     );
   }
@@ -91,7 +91,7 @@ function parseArtifactName(artifactName: string): {
 /**
  * Finds the build-info source key matching `artifactSource`.
  * If multiple keys end with the same suffix (ambiguous path prefix), picks the
- * first and warns — callers should use a fully-qualified artifact name to avoid
+ * first and warns; callers should use a fully-qualified artifact name to avoid
  * this. Falls back to `artifactSource` itself when no key matches.
  */
 export function resolveWinnerSource(
@@ -105,7 +105,7 @@ export function resolveWinnerSource(
   if (matches.length > 1) {
     logger.warn(
       `Ambiguous source for contract "${contractName}": ` +
-        `multiple build-info sources match "${artifactSource}" — using "${matches[0]}". ` +
+        `multiple build-info sources match "${artifactSource}": using "${matches[0]}". ` +
         `Use a fully-qualified artifact name (sourceName:contractName) to disambiguate.`,
     );
   }
@@ -230,7 +230,7 @@ export async function getContractBuildData(
     proxyKind: undefined as ProxyKind | undefined,
   };
 
-  // readArtifact throws if the contract has not been compiled — let it propagate
+  // readArtifact throws if the contract has not been compiled; let it propagate
   // so callers can catch and show "[SKIP] artifact not found".
   const artifact = await artifacts.readArtifact(qualifiedName);
 

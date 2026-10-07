@@ -12,7 +12,7 @@
  *   // Throws with a detailed error if storage layout is incompatible:
  *   await assertProxyUpgrade(hre, "MyContract");
  *
- *   // Your existing deploy call — completely unchanged:
+ *   // Your existing deploy call, completely unchanged:
  *   await deployViaProxy("MyContract", ...);
  */
 
@@ -146,7 +146,7 @@ export async function validateProxyUpgrade(
 
   if (newLayout === undefined) {
     throw new Error(
-      `[hardhat-upgrades-validator] Storage layout for "${contractName}" not found in validation cache — run \`hardhat compile\` first.`,
+      `[hardhat-upgrades-validator] Storage layout for "${contractName}" not found in validation cache. Run \`hardhat compile\` first.`,
     );
   }
 

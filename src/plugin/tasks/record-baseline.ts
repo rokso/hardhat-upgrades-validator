@@ -267,16 +267,16 @@ async function recordBaseline(
       immutableReferences?: ImmutableReferences;
     };
   } catch {
-    logger.log(`  [SKIP] "${name}" — artifact not found. Run \`hardhat build\` first.`);
+    logger.log(`  [SKIP] "${name}": artifact not found. Run \`hardhat build\` first.`);
     return "skipped";
   }
 
   if (layout === undefined) {
     const reason =
       ctx.validations === undefined
-        ? `validation cache not found — run \`hardhat compile\` first.`
-        : `contract not in validation cache — run \`hardhat compile\` to refresh.`;
-    logger.log(`  [SKIP] "${name}" — ${reason}`);
+        ? `validation cache not found. Run \`hardhat compile\` first.`
+        : `contract not in validation cache. Run \`hardhat compile\` to refresh.`;
+    logger.log(`  [SKIP] "${name}": ${reason}`);
     return "skipped";
   }
 

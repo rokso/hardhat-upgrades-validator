@@ -147,7 +147,7 @@ describe("validateStorageUpgrade", () => {
 });
 
 // ---------------------------------------------------------------------------
-// extractAnnotationMaps — cross-file inheritance
+// extractAnnotationMaps: cross-file inheritance
 // ---------------------------------------------------------------------------
 
 async function loadParsedBuildInfo(contractName: string): Promise<{
@@ -271,7 +271,7 @@ describe("unsafe-allow annotations", () => {
 
     expect(v2.unsafeAllowFromAnnotation).toEqual(["type-changed"]);
 
-    // Without passing the annotation-derived allow — type change must error.
+    // Without passing the annotation-derived allow: type change must error.
     const withoutContractUnsafeAllow = validateStorageUpgrade(
       "V1",
       v1.upgradeStorageLayout!,
@@ -284,7 +284,7 @@ describe("unsafe-allow annotations", () => {
     expect(withoutContractUnsafeAllow.ok).toBe(false);
     expect(withoutContractUnsafeAllow.errors.some((e) => e.kind === "type-changed")).toBe(true);
 
-    // With the contract-level annotation applied — all type changes suppressed.
+    // With the contract-level annotation applied: all type changes suppressed.
     const withContractUnsafeAllow = validateStorageUpgrade(
       "V1",
       v1.upgradeStorageLayout!,
@@ -339,7 +339,7 @@ describe("unsafe-allow annotations", () => {
 });
 
 // ---------------------------------------------------------------------------
-// extractAnnotationMaps — canonicalization edge cases (synthetic data)
+// extractAnnotationMaps: canonicalization edge cases (synthetic data)
 // ---------------------------------------------------------------------------
 
 describe("extractAnnotationMaps - canonicalization edge cases", () => {
@@ -370,7 +370,7 @@ describe("extractAnnotationMaps - canonicalization edge cases", () => {
       },
       sources: {
         "contracts/Token.sol": {
-          // no ast field — sourcesWithAst will be empty
+          // no ast field: sourcesWithAst will be empty
         },
       },
     };

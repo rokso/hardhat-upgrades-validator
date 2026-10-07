@@ -167,7 +167,7 @@ describe("layoutchange uncertain same-size suppression", () => {
 // ---------------------------------------------------------------------------
 
 describe("unsupported oz-core op kind", () => {
-  it("passes validation — unknown op is skipped, not treated as an error", () => {
+  it("passes validation: unknown op is skipped, not treated as an error", () => {
     vi.mocked(getStorageUpgradeReport).mockReturnValue({
       ops: [
         {

@@ -86,7 +86,7 @@ let tmpDir: string;
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vutest-"));
   vi.clearAllMocks();
-  // Default stubs — individual tests override as needed.
+  // Default stubs: individual tests override as needed.
   vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [] });
   vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   vi.mocked(readDeployment).mockResolvedValue(null);
@@ -199,7 +199,7 @@ describe("unsafeAllow token parsing", () => {
     );
     const call = vi.mocked(validateStorageUpgrade).mock.calls[0];
     const opts = call[3] as { unsafeAllow?: string[] };
-    // Task does not filter — unknown tokens reach validateStorageUpgrade,
+    // Task does not filter; unknown tokens reach validateStorageUpgrade,
     // which is the single validation point (tested in validate-proxy.test.ts).
     expect(opts.unsafeAllow).toContain("variable-renamed");
     expect(opts.unsafeAllow).toContain("unknown-kind");

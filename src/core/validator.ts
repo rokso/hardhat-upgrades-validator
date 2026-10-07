@@ -21,7 +21,7 @@ export type { ValidateOptions } from "../types/validation.js";
  * Both layouts must be in OZ format (as returned by `getContractBuildData`
  * or stored in the deployment file under `upgradeStorageLayout`).
  *
- * Rename approvals are embedded in `newLayout.storage[].renamedFrom` —
+ * Rename approvals are embedded in `newLayout.storage[].renamedFrom`:
  * no separate rename map is needed here.
  */
 export function validateStorageUpgrade(
@@ -58,7 +58,7 @@ export function validateStorageUpgrade(
   if (options.unsafeSkipStorageCheck) {
     logger.warn(
       `Storage layout validation SKIPPED for "${contractName}". ` +
-        `unsafeSkipStorageCheck is set — you are responsible for storage correctness.`,
+        `unsafeSkipStorageCheck is set; you are responsible for storage correctness.`,
     );
     return {
       ok: true,
@@ -109,13 +109,13 @@ export function formatValidationResult(contractName: string, result: ValidationR
     ? `\n         baseline: ${describeBaseline(result.baseline)}`
     : "";
   if (result.ok && result.warnings.length === 0) {
-    return `  [OK]   "${contractName}" — storage layout validation passed.${baseline}`;
+    return `  [OK]   "${contractName}": storage layout validation passed.${baseline}`;
   }
 
   const lines: string[] = [];
 
   if (result.ok && result.baseline) {
-    lines.push(`  [OK]   "${contractName}" — storage layout validation passed.${baseline}`);
+    lines.push(`  [OK]   "${contractName}": storage layout validation passed.${baseline}`);
   }
 
   if (!result.ok) {
@@ -317,7 +317,7 @@ function mapAndFilter(
         // explicit handling for any new op kind.
         logger.warn(
           `Unknown storage operation kind "${String(kind)}" ` +
-            `from oz-core — plugin may need updating to fully validate this upgrade.`,
+            `from oz-core; the plugin may need updating to fully validate this upgrade.`,
         );
         break;
       }
@@ -380,7 +380,7 @@ function formatWarning(w: ValidationResult["warnings"][number]): string {
     case "gap-shrunken":
       return `  [WARN] Gap variable "${w.label}" was reduced: ${w.oldSize} slots → ${w.newSize} slots`;
     case "no-baseline":
-      return `  [INFO] No prior deployment found for "${w.contractName}" — skipping validation (first deployment).`;
+      return `  [INFO] No prior deployment found for "${w.contractName}"; skipping validation (first deployment).`;
     case "storage-check-skipped":
       return `  [WARN] Storage layout validation was skipped for "${w.contractName}" (unsafeSkipStorageCheck). You are responsible for storage correctness.`;
     case "deprecated-baseline":

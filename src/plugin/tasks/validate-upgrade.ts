@@ -273,16 +273,16 @@ async function validateContract(
       opts.proxyKind,
     ));
   } catch {
-    logger.log(`  [SKIP] "${name}" — artifact not found. Has the contract been compiled?`);
+    logger.log(`  [SKIP] "${name}": artifact not found. Has the contract been compiled?`);
     return null;
   }
 
   if (upgradeStorageLayout === undefined) {
     const reason =
       validations === undefined
-        ? `validation cache not found — run \`hardhat compile\` first.`
-        : `contract not in validation cache — run \`hardhat compile\` to refresh.`;
-    logger.log(`  [SKIP] "${name}" — ${reason}`);
+        ? `validation cache not found. Run \`hardhat compile\` first.`
+        : `contract not in validation cache. Run \`hardhat compile\` to refresh.`;
+    logger.log(`  [SKIP] "${name}": ${reason}`);
     return null;
   }
 

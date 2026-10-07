@@ -155,7 +155,7 @@ describe("stripBytecodeMetadata", () => {
   it("returns original when too short to contain metadata", () => {
     const short = "0x1234";
     // The length field would claim 0x1234 = 4660 bytes of metadata, but the
-    // bytecode itself is only 2 bytes total — sanity check should kick in.
+    // bytecode itself is only 2 bytes total: sanity check should kick in.
     const result = stripBytecodeMetadata(short);
     expect(result).toBe(short);
   });

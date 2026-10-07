@@ -36,7 +36,7 @@ Initial alpha release.
 - `validate-upgrade` task: compare baselines vs compiled artifacts on demand or in CI
 - `assertProxyUpgrade` / `validateProxyUpgrade` proxy helpers (import from `hardhat-upgrades-validator/proxy`)
 - `newImpl` option on proxy helpers to validate against a different implementation artifact
-- NatSpec annotations: `renamed-from`, `retyped-from`, `unsafe-allow` — on state variables, struct members, and contracts
+- NatSpec annotations: `renamed-from`, `retyped-from`, `unsafe-allow`, on state variables, struct members, and contracts
 - ERC-7201 namespace storage support
 - hardhat-deploy v2 deploy hook: auto-stamps baseline after each proxy deploy
 - Contract-level safety checks: constructor, delegatecall, selfdestruct, immutables, state variable assignment, external library linking
