@@ -31,6 +31,7 @@ import {
 import {
   layoutStoreDir,
   listProxyEntries,
+  markFullScan,
   readProxyEntry,
   updateProxyEntry,
 } from "../../core/onchain/store.js";
@@ -53,6 +54,8 @@ export interface DiscoveryError {
 
 export interface Discovery {
   proxies: DiscoveredProxy[];
+  /** Proxy addresses whose only files describe the proxy contract itself. */
+  unvalidated: string[];
   errors: DiscoveryError[];
 }
 
@@ -112,6 +115,7 @@ export async function discoverProxies(
   }
 
   const proxies: DiscoveredProxy[] = [];
+  const unvalidated: string[] = [];
   const errors: DiscoveryError[] = [];
   await forEachLimit([...byAddress], RPC_CONCURRENCY, async ([address, names]) => {
     try {
@@ -128,6 +132,7 @@ export async function discoverProxies(
         proxies.push({ proxy: address, ...state, deployments: logic.sort() });
       } else {
         // Nothing names the new side, so this proxy cannot be validated; say so.
+        unvalidated.push(address);
         logger.warn(
           `${address} is a proxy, but ${names.map((n) => `"${n}"`).join(", ")} ` +
             `${names.length === 1 ? "describes" : "describe"} the proxy contract itself and no ` +
@@ -140,6 +145,7 @@ export async function discoverProxies(
   });
   return {
     proxies: proxies.sort((a, b) => a.proxy.localeCompare(b.proxy)),
+    unvalidated: unvalidated.sort(),
     errors: errors.sort((a, b) => a.address.localeCompare(b.address)),
   };
 }
@@ -165,14 +171,17 @@ export async function classifyDeployment(
 
 /**
  * Records what the chain reported, rewriting an entry only when it changed.
- * The index only helps later offline runs, so a failed write is a warning.
+ * Pass `fullScan` when `proxies` came from classifying every deployment
+ * without errors, so the index is known complete. The index only helps later
+ * runs, so a failed write is a warning.
  */
 export async function updateProxyIndex(
   deploymentsDir: string,
   provider: EthProvider,
   proxies: DiscoveredProxy[],
+  fullScan = false,
 ): Promise<void> {
-  if (proxies.length === 0) return;
+  if (proxies.length === 0 && !fullScan) return;
   try {
     const [chainId, observedAtBlock] = await Promise.all([
       readChainId(provider),
@@ -189,6 +198,9 @@ export async function updateProxyIndex(
         deployments: p.deployments,
         observedAtBlock,
       });
+    }
+    if (fullScan) {
+      await markFullScan(storeDir, { format: 1, chainId, firstFullScanAtBlock: observedAtBlock });
     }
   } catch (e) {
     logger.warn(`Could not update the proxy index: ${(e as Error).message}`);
@@ -210,7 +222,7 @@ export async function listProxyDeployments(
   const deployments = await readDeployments(deploymentsDir);
   if (provider !== undefined) {
     const { proxies, errors } = await discoverProxies(provider, deployments, { localCode });
-    await updateProxyIndex(deploymentsDir, provider, proxies);
+    await updateProxyIndex(deploymentsDir, provider, proxies, errors.length === 0);
     return { names: proxies.flatMap((p) => p.deployments).sort(), errors };
   }
 
@@ -264,8 +276,9 @@ async function readCodeOrUndefined(
 // code is the code there) or the code behind it. Any match, even
 // metadata-only, means the former: this classifies, it does not prove a
 // layout. Missing code comes from the local build. Immutable positions come
-// from the file, else the local build, else are inferred from the code:
-// prebuilt proxy artifacts (as hardhat-deploy v2 ships them) list none.
+// from the file, else the local build when it is the same code (positions
+// from another build would mask the wrong bytes), else are inferred from the
+// code: prebuilt proxy artifacts (as hardhat-deploy v2 ships them) list none.
 async function fileRole(
   code: string,
   name: string,
@@ -276,7 +289,9 @@ async function fileRole(
   if (deployedBytecode === undefined || immutableReferences === undefined) {
     const local = await localCode?.(name, deployment);
     deployedBytecode ??= local?.deployedBytecode;
-    immutableReferences ??= local?.immutableReferences;
+    if (sameCode(deployedBytecode, local?.deployedBytecode)) {
+      immutableReferences ??= local?.immutableReferences;
+    }
   }
   // Nothing to compare: the file names a contract, which validation reads
   // from the build (and skips when there is none).
@@ -285,6 +300,14 @@ async function fileRole(
   return compareDeployedBytecode(code, deployedBytecode, immutableReferences) === "none"
     ? "logic"
     : "proxy-contract";
+}
+
+function sameCode(a: string | undefined, b: string | undefined): boolean {
+  return (
+    a !== undefined &&
+    b !== undefined &&
+    a.toLowerCase().replace(/^0x/, "") === b.toLowerCase().replace(/^0x/, "")
+  );
 }
 
 async function forEachLimit<T>(

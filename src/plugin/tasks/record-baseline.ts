@@ -30,7 +30,6 @@ import {
 } from "../internals/deployment-utils.js";
 import {
   artifactCodeLookup,
-  classifyDeployment,
   discoverProxies,
   updateProxyIndex,
   type DiscoveredProxy,
@@ -125,7 +124,12 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
         );
         anyFailed = true;
       }
-      await updateProxyIndex(deploymentsDir, provider!, found.discovered);
+      await updateProxyIndex(
+        deploymentsDir,
+        provider!,
+        found.discovered,
+        all && found.errors.length === 0,
+      );
       const { targets } = found;
       if (targets.length === 0) {
         if (all) logger.log(`[INFO] No proxy deployments found in ${deploymentsDir}`);
@@ -192,21 +196,23 @@ async function findTargets(
     logger.log(`  [SKIP] "${contract}": no deployment file with an address.`);
     return { discovered: [], targets: [], errors: [] };
   }
-  const { proxies, errors } = await discoverProxies(provider, deployments, {
+  const { proxies, unvalidated, errors } = await discoverProxies(provider, deployments, {
     only: new Set([address]),
     localCode,
   });
   const proxy = proxies[0];
-  if (errors.length === 0 && (proxy === undefined || !proxy.deployments.includes(contract))) {
-    const { role } = await classifyDeployment(provider, contract, deployment, localCode);
-    logger.log(
-      role === "proxy-contract"
-        ? `  [SKIP] "${contract}": describes the proxy contract itself; record the deployment that describes the code behind it${proxy ? ` (${proxy.deployments.join(", ")})` : ""}.`
-        : `  [SKIP] "${contract}": ${address} has no ERC-1967 implementation or beacon slot set on this chain.`,
-    );
-    return { discovered: proxies, targets: [], errors };
+  if (errors.length > 0) return { discovered: proxies, targets: [], errors };
+  if (proxy?.deployments.includes(contract)) {
+    return { discovered: proxies, targets: [[contract, proxy]], errors };
   }
-  return { discovered: proxies, targets: proxy ? [[contract, proxy]] : [], errors };
+  logger.log(
+    proxy !== undefined
+      ? `  [SKIP] "${contract}": describes the proxy contract itself; record the deployment that describes the code behind it (${proxy.deployments.join(", ")}).`
+      : unvalidated.includes(address)
+        ? `  [SKIP] "${contract}": describes the proxy contract itself, and no deployment describes the code behind it.`
+        : `  [SKIP] "${contract}": ${address} has no ERC-1967 implementation or beacon slot set on this chain.`,
+  );
+  return { discovered: proxies, targets: [], errors };
 }
 
 async function recordBaseline(

@@ -290,7 +290,11 @@ async function runAutoValidation(
     for (const name of contractNames) {
       const deployment = await readDeployment(deploymentsDir, name);
 
-      if (!deployment) continue;
+      if (!deployment) {
+        logger.log(`  [SKIP] "${network}/${name}": deployment file not found.`);
+        skipped++;
+        continue;
+      }
 
       // Compiling must not need an RPC or explorer, so this is always offline:
       // the record for the implementation the proxy index names, else the
@@ -341,6 +345,10 @@ async function runAutoValidation(
       }
 
       if (upgradeStorageLayout === undefined) {
+        logger.log(
+          `  [SKIP] "${network}/${name}": no storage layout for ${artifactName} in the validation cache.`,
+        );
+        skipped++;
         continue;
       }
 

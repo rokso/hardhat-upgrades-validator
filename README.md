@@ -143,7 +143,7 @@ export default deployScript(
 );
 ```
 
-After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read. A queued upgrade to a differently named contract (`MyToken` to `MyTokenV2`) is linked to its proxy only by file names, which are not trusted, so it is recorded once the upgrade has executed, by the next deploy, `record-baseline` or validation. The first deploy with no proxy index classifies every deployment once, creating the index.
+After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read. A queued upgrade to a differently named contract (`MyToken` to `MyTokenV2`) is linked to its proxy only by file names, which are not trusted, so it is recorded once the upgrade has executed, by the next deploy, `record-baseline` or validation. Until every deployment on the network has been classified once without errors (by the deploy hook, `record-baseline --all` or `validate-upgrade --all`, recorded in `scan.json`), the deploy hook classifies all of them, so the index is complete from then on, even on a network with no proxies.
 
 ### Standard upgrade
 
@@ -421,6 +421,7 @@ Under `deployments/<network>/.storage-layouts/`, one JSON file per address:
 deployments/mainnet/.storage-layouts/
   implementations/<implementation>.json   layout records
   proxies/<proxy>.json                    the proxy index
+  scan.json                               when every deployment was first classified
 ```
 
 Commit them: they are reviewable in PRs and let CI validate without an explorer key or an RPC. One file per address keeps unrelated upgrades from conflicting. hardhat-deploy only loads `*.json` files directly inside the network directory, so the dot-directory is never read as a deployment.

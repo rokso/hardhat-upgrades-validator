@@ -4,6 +4,8 @@
  * - `implementations/<address>.json`: one layout record per implementation.
  * - `proxies/<address>.json`: one index entry per proxy, naming the
  *   implementation it ran when last observed.
+ * - `scan.json`: when every deployment was first classified, so the index is
+ *   known to be complete even for a network with no proxies.
  *
  * Meant to be committed: records are reviewable in PRs and let CI validate
  * without an explorer key. One file per address keeps unrelated upgrades from
@@ -21,6 +23,14 @@ import type { ImplementationLayoutRecord, ProxyIndexEntry } from "./types.js";
 export const LAYOUT_STORE_DIRNAME = ".storage-layouts";
 const IMPLEMENTATIONS_DIRNAME = "implementations";
 const PROXIES_DIRNAME = "proxies";
+const SCAN_FILENAME = "scan.json";
+
+export interface ScanMarker {
+  format: 1;
+  chainId: number;
+  /** The first full scan; later scans do not rewrite it. */
+  firstFullScanAtBlock: number;
+}
 
 export function layoutStoreDir(deploymentsDir: string): string {
   return join(deploymentsDir, LAYOUT_STORE_DIRNAME);
@@ -88,6 +98,22 @@ export async function updateProxyEntry(storeDir: string, entry: ProxyIndexEntry)
   if (current !== undefined && sameState(current, next)) return false;
   await writeEntry(storeDir, PROXIES_DIRNAME, proxy, next);
   return true;
+}
+
+export async function readScanMarker(storeDir: string): Promise<ScanMarker | undefined> {
+  const marker = await tryReadJsonFile<ScanMarker>(join(storeDir, SCAN_FILENAME));
+  if (marker !== undefined) checkFormat(marker.format, "proxy scan marker");
+  return marker;
+}
+
+/** Writes the marker unless one exists, so it never churns. */
+export async function markFullScan(storeDir: string, marker: ScanMarker): Promise<void> {
+  if ((await readScanMarker(storeDir)) !== undefined) return;
+  await mkdir(storeDir, { recursive: true });
+  await writeJsonFile(join(storeDir, SCAN_FILENAME), marker, {
+    pretty: true,
+    trailingNewline: true,
+  });
 }
 
 function sameState(a: ProxyIndexEntry, b: ProxyIndexEntry): boolean {

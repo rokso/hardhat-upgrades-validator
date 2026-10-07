@@ -295,6 +295,39 @@ describe("proxy index", () => {
     expect(logs.join("\n")).toMatch(/proxy contract itself.*\(MyContract\)/);
   });
 
+  it("marks the network fully scanned only after --all", async () => {
+    const chain = () =>
+      makeMockChain({
+        code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+        implementations: { [PROXY]: IMPL },
+      });
+    const scan = join(deploymentsDir, ".storage-layouts", "scan.json");
+
+    await recordBaselineAction(baseArgs, makeHre(chain()) as never);
+    await expect(readFile(scan, "utf8")).rejects.toThrow(/ENOENT/);
+
+    await recordBaselineAction(
+      { ...baseArgs, contract: undefined, all: true },
+      makeHre(chain()) as never,
+    );
+    expect(JSON.parse(await readFile(scan, "utf8"))).toMatchObject({ format: 1, chainId: 1 });
+  });
+
+  it("says so when the only file at a proxy describes the proxy contract itself", async () => {
+    await writeDeployment("MyContract", { address: PROXY, deployedBytecode: PROXY_CODE });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+
+    await recordBaselineAction(baseArgs, makeHre(chain) as never);
+
+    expect(logs.join("\n")).toMatch(
+      /"MyContract": describes the proxy contract itself, and no deployment describes the code behind it/,
+    );
+  });
+
   it("--all records once per proxy, skipping the proxy contract's file", async () => {
     await writeDeployment("MyContract_Proxy", { address: PROXY, deployedBytecode: PROXY_CODE });
     const chain = makeMockChain({

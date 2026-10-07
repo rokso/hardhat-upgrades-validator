@@ -12,15 +12,9 @@
  *   named contract is recorded once the upgrade executes and a later deploy
  *   or record-baseline sees it.
  *
- * The first run with no proxy index classifies every deployment once, so the
- * index exists from then on.
- *
- * A record is written only when the chain runs the local build, so
- * implementations deployed through the plugin never need an explorer to be
- * validated against later. Recording against the implementation (not the
- * proxy) is what keeps queued upgrades correct: validation keeps comparing
- * against whatever the proxy actually runs until the upgrade executes, and a
- * record for an upgrade that never executes is simply never read.
+ * Until every deployment has been classified once without errors (recorded
+ * in `.storage-layouts/scan.json`), a run classifies all of them, so the
+ * index is complete from then on, even on a network with no proxies.
  */
 
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
@@ -46,7 +40,12 @@ import {
   updateProxyIndex,
 } from "../internals/proxy-discovery.js";
 import { recordLocalBuild } from "../../core/onchain/baseline.js";
-import { layoutStoreDir, listProxyEntries, readLayoutRecord } from "../../core/onchain/store.js";
+import {
+  layoutStoreDir,
+  listProxyEntries,
+  readLayoutRecord,
+  readScanMarker,
+} from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
 import type { ImmutableReferences } from "../../core/bytecode-utils.js";
 import { listDirOrEmpty } from "../../utils/io.js";
@@ -123,11 +122,11 @@ async function recordImplementationLayouts(
       if (address !== undefined) changedAddresses.add(address);
     }
 
-    // With no index yet (the first deploy after adopting the plugin), look at
-    // every deployment once, so a queued upgrade's implementation can be told
-    // apart from an unrelated contract.
+    // Until every deployment has been classified once (the first deploy after
+    // adopting the plugin), look at all of them, so a queued upgrade's
+    // implementation can be told apart from an unrelated contract.
     const storeDir = layoutStoreDir(deploymentsDir);
-    const bootstrap = (await listProxyEntries(storeDir)).length === 0;
+    const bootstrap = (await readScanMarker(storeDir)) === undefined;
     const { proxies: discovered, errors } = await discoverProxies(provider, deployments, {
       ...(bootstrap ? {} : { only: changedAddresses }),
       localCode: artifactCodeLookup(hre.artifacts),
@@ -135,7 +134,7 @@ async function recordImplementationLayouts(
     for (const e of errors) {
       logger.warn(`Could not classify ${e.address} (${e.deployments.join(", ")}): ${e.reason}`);
     }
-    await updateProxyIndex(deploymentsDir, provider, discovered);
+    await updateProxyIndex(deploymentsDir, provider, discovered, bootstrap && errors.length === 0);
 
     const recorder = makeRecorder(hre, provider, storeDir);
 

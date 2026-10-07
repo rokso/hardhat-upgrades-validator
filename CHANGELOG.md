@@ -12,6 +12,7 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 - Proxies are discovered from the chain (ERC-1967 implementation or beacon slot) and file contents, never from file names or an `implementation` field, which hardhat-deploy v2 does not write. Of several files at one proxy address, the one whose code is the proxy's own is skipped, with immutable positions inferred when a prebuilt proxy artifact lists none. A failure at one address is reported for that address only.
 - A proxy index under `.storage-layouts/proxies/` records which implementation each proxy ran when last observed, so the compile hook and other offline runs pick the right record. Offline results name the block it was observed at.
 - The deploy hook looks only at deployment files the deploy changed, and also records freshly deployed implementations whose upgrade is still queued (same contract name; a renamed contract is recorded once its upgrade executes).
+- `.storage-layouts/scan.json` records that every deployment has been classified once, so the deploy hook scans the whole network only until then.
 - The compile hook names every proxy it skips and no longer prints "All storage layout checks passed" when it skipped any.
 - `record-baseline --from-chain` rebuilds records from verified source for proxies running code the local tree has moved past.
 - New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, usable from plain ESM scripts and other tooling.

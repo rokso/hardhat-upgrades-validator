@@ -116,10 +116,12 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
 
       const localCode = artifactCodeLookup(hre.artifacts);
       let contractNames: string[];
+      let undiscovered = 0;
       try {
         if (all) {
           const listed = await listProxyDeployments(deploymentsDir, chain, localCode);
           contractNames = listed.names;
+          undiscovered = listed.errors.length;
           for (const e of listed.errors) {
             logger.log(
               `  [ERROR] "${networkName}" ${e.address} (${e.deployments.map((n) => `"${n}"`).join(", ")}): ${e.reason}`,
@@ -138,7 +140,11 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
       }
 
       if (contractNames.length === 0) {
-        logger.log(`[INFO] No proxy deployments found in ${deploymentsDir}`);
+        logger.log(
+          undiscovered === 0
+            ? `[INFO] No proxy deployments found in ${deploymentsDir}`
+            : `[INFO] No other proxy deployments found in ${deploymentsDir}`,
+        );
         continue;
       }
 

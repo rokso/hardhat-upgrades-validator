@@ -40,6 +40,9 @@ export {
   readProxyEntry,
   listProxyEntries,
   updateProxyEntry,
+  readScanMarker,
+  markFullScan,
+  type ScanMarker,
 } from "./store.js";
 export type { EthProvider, ImplementationLayoutRecord, ProxyIndexEntry } from "./types.js";
 export {

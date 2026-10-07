@@ -297,6 +297,53 @@ describe("first deploy after adopting the plugin", () => {
   });
 });
 
+describe("full scan marker", () => {
+  const standalone = (n: number) => ({
+    address: OTHER,
+    contractName: "Standalone",
+    sourceName: "contracts/Standalone.sol",
+    deployedBytecode: COMPILED,
+    immutableReferences: {},
+    receipt: { n },
+  });
+
+  it("scans every deployment once, then only what changed, even with no proxies", async () => {
+    const state = chainState(IMPL);
+    state.code![OTHER] = DEPLOYED;
+    state.implementations = {}; // no proxies on this network
+    await writeDeployments(deploymentsDir, { Unchanged: { address: IMPL } });
+
+    await deployOverride(
+      {},
+      makeHre(makeMockChain(state)) as never,
+      deploying({ S: standalone(1) }),
+    );
+    expect(await readStore(deploymentsDir, "", "scan")).toMatchObject({ format: 1, chainId: 1 });
+
+    const chain = makeMockChain(state);
+    await deployOverride({}, makeHre(chain) as never, deploying({ S: standalone(2) }));
+    const touched = chain.send.mock.calls
+      .filter(([method]) => method === "eth_getStorageAt" || method === "eth_getCode")
+      .map(([, params]) => String((params as unknown[])[0]).toLowerCase());
+    expect(touched.length).toBeGreaterThan(0);
+    expect(touched.every((a) => a === OTHER)).toBe(true);
+  });
+
+  it("does not mark the scan complete when an address failed", async () => {
+    const state = chainState(IMPL);
+    state.beacons = { [OTHER]: "0x00000000000000000000000000000000000000ee" }; // reverts
+    state.code![OTHER] = DEPLOYED;
+
+    await deployOverride(
+      {},
+      makeHre(makeMockChain(state)) as never,
+      deploying({ S: standalone(1) }),
+    );
+
+    expect(await readStore(deploymentsDir, "", "scan")).toBeUndefined();
+  });
+});
+
 describe("what gets recorded", () => {
   it("does not record a changed contract no proxy's deployment describes", async () => {
     const state = chainState(IMPL);

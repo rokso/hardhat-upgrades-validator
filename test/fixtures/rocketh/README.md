@@ -17,5 +17,5 @@ Snapshots, each a deployments directory plus `<name>.chain.json` (runtime code a
 Deployment files are trimmed to the fields the plugin reads (`trim.mjs`); values are unchanged. Regenerate with:
 
 ```sh
-cd test/fixtures/rocketh/generator && npm install && ./generate.sh ..
+cd test/fixtures/rocketh/generator && npm ci && ./generate.sh ..
 ```

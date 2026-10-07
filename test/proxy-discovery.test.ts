@@ -115,6 +115,7 @@ describe("discoverProxies", () => {
   it("finds the proxy and the file describing its code, not the proxy contract's own file", async () => {
     expect(await discover()).toEqual({
       proxies: [{ proxy: PROXY, implementation: IMPL, deployments: ["Box"] }],
+      unvalidated: [],
       errors: [],
     });
   });
@@ -145,7 +146,7 @@ describe("discoverProxies", () => {
   it("warns about a proxy whose only file describes the proxy contract itself", async () => {
     await rm(join(deploymentsDir, "Box.json"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(await discover()).toEqual({ proxies: [], errors: [] });
+    expect(await discover()).toEqual({ proxies: [], unvalidated: [PROXY], errors: [] });
     expect(warn.mock.calls.flat().join("\n")).toMatch(/no deployment describes the code behind it/);
   });
 
@@ -161,7 +162,7 @@ describe("discoverProxies", () => {
   it("skips an address with a slot set but no code", async () => {
     const state = chainState();
     delete state.code![PROXY];
-    expect(await discover(state)).toEqual({ proxies: [], errors: [] });
+    expect(await discover(state)).toEqual({ proxies: [], unvalidated: [], errors: [] });
   });
 });
 
@@ -175,11 +176,22 @@ describe("files missing code or immutable positions", () => {
     expect(lookup).toHaveBeenCalledWith("Box_Proxy", expect.anything());
   });
 
+  it("does not apply positions from a local build of different code", async () => {
+    // Same contract name, other build: its positions would mask the wrong bytes.
+    await writeDeployments({ Box_Proxy: without(boxFiles.Box_Proxy, "immutableReferences") });
+    const otherBuild: LocalCodeLookup = async () => ({
+      deployedBytecode: "0x6080604052" + "00".repeat(40),
+      immutableReferences: { "9": [{ start: 0, length: 1 }] },
+    });
+    expect((await discover(chainState(), otherBuild)).proxies[0].deployments).toEqual(["Box"]);
+  });
+
   it("infers immutable positions from zeroed PUSH32 operands when nothing lists them", async () => {
     // As hardhat-deploy v2 ships its prebuilt proxy artifacts.
     await writeDeployments({ Box_Proxy: without(boxFiles.Box_Proxy, "immutableReferences") });
     expect(await discover()).toEqual({
       proxies: [{ proxy: PROXY, implementation: IMPL, deployments: ["Box"] }],
+      unvalidated: [],
       errors: [],
     });
   });

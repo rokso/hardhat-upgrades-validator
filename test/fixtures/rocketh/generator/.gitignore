@@ -4,4 +4,3 @@ cache/
 generated/
 deployments/
 node.log
-package-lock.json

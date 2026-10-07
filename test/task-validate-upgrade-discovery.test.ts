@@ -191,6 +191,39 @@ describe("validate-upgrade --all discovery errors", () => {
   });
 });
 
+describe("validate-upgrade messages", () => {
+  it("does not claim the network has no proxies when discovery failed for some", async () => {
+    await rm(join(deploymentsDir, "Box.json"));
+    const provider = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: LOGIC_CODE },
+      beacons: { [PROXY]: "0x00000000000000000000000000000000000000ee" },
+    });
+
+    await validateUpgradeAction(args({ all: true }), makeHre(provider) as never);
+
+    const out = logs.join("\n");
+    expect(out).toMatch(/\[ERROR\]/);
+    expect(out).toMatch(/No other proxy deployments found/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("offline: skips a file the index does not list for its proxy, even with the deprecated field", async () => {
+    await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
+    await writeFile(
+      join(deploymentsDir, "Box_Proxy.json"),
+      JSON.stringify({ ...files.Box_Proxy, upgradeStorageLayout: layout }),
+      "utf8",
+    );
+    vi.mocked(getContractBuildData).mockClear();
+    logs = [];
+
+    await validateUpgradeAction(args({ contract: "Box_Proxy" }), makeHre(undefined) as never);
+
+    expect(validated()).toEqual([]);
+    expect(logs.join("\n")).toMatch(/the proxy index lists another deployment/);
+  });
+});
+
 describe("validate-upgrade --contract", () => {
   it("skips the file that describes the proxy contract itself", async () => {
     await validateUpgradeAction(args({ contract: "Box_Proxy" }), makeHre(chain()) as never);

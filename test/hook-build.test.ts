@@ -343,4 +343,45 @@ describe("auto-validation from the proxy index", () => {
     expect(out).not.toMatch(/All storage layout checks passed/);
     expect(process.exitCode).toBeUndefined();
   });
+
+  it("names a proxy whose new layout is missing from the validation cache", async () => {
+    await writeDeployment("mainnet", "Recorded", { address: PROXY });
+    await writeDeployment("mainnet", "Other", { address: OTHER, upgradeStorageLayout: testLayout });
+    await index(PROXY, IMPL, "Recorded");
+    await writeLayoutRecord(storeDir(), {
+      format: 1,
+      address: IMPL,
+      chainId: 1,
+      codeSha256: "00",
+      contract: "a.sol:Recorded",
+      bytecodeMatch: "exact",
+      source: "local-compile",
+      recordedAt: "2026-01-01T00:00:00.000Z",
+      layout: testLayout as never,
+    });
+    vi.mocked(getContractBuildData).mockImplementation(
+      async (name: string) =>
+        (name === "Recorded"
+          ? { upgradeStorageLayout: undefined }
+          : {
+              upgradeStorageLayout: testLayout,
+              unsafeAllowFromAnnotation: [],
+              perVariableUnsafeAllow: new Map(),
+              namespaceUnsafeAllow: new Map(),
+              safetyErrors: [],
+            }) as never,
+    );
+    const logs: string[] = [];
+    const spy = vi
+      .spyOn(console, "log")
+      .mockImplementation((m: string) => void logs.push(String(m)));
+
+    const hooks = await compileHookFactory();
+    await hooks.build(makeContext() as never, [], undefined, makeNext());
+    spy.mockRestore();
+
+    const out = logs.join("\n");
+    expect(out).toMatch(/\[SKIP\] "mainnet\/Recorded": no storage layout for Recorded/);
+    expect(out).toMatch(/Storage layout checks passed; 1 skipped/);
+  });
 });
