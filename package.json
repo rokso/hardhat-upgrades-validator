@@ -1,6 +1,6 @@
 {
   "name": "hardhat-upgrades-validator",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Hardhat v3 plugin to validate storage layout compatibility when upgrading proxy contracts managed by hardhat-deploy v2",
   "license": "MIT",
   "type": "module",
@@ -8,20 +8,23 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./proxy": {
-      "import": "./dist/proxy/validate-proxy.js",
-      "types": "./dist/proxy/validate-proxy.d.ts"
+      "types": "./dist/proxy/validate-proxy.d.ts",
+      "import": "./dist/proxy/validate-proxy.js"
     },
     "./onchain": {
-      "import": "./dist/core/onchain/index.js",
-      "types": "./dist/core/onchain/index.d.ts"
-    }
+      "types": "./dist/core/onchain/index.d.ts",
+      "import": "./dist/core/onchain/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "src",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
@@ -57,7 +60,7 @@
     "vitest": "^4.1.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "keywords": [
     "hardhat",

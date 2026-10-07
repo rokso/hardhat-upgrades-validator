@@ -19,11 +19,19 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 - New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, usable from plain ESM scripts and other tooling.
 - New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.
 - The compile hook uses only hooks Hardhat supports going forward: the solc outputs validation needs are requested through the resolved config, and `validate()` plus the namespaced compilation run in `getCompilationJobErrors`, compiling through Hardhat's `compileBuildInfo` (so WASM-only platforms work too). Connections use `network.create()`.
+- `--network` now restricts `validate-upgrade` and `record-baseline` to that network's directory. It is a Hardhat global option and never reached the tasks, so they always processed every network.
+- The deploy hook no longer aborts a deploy run without `--network`.
+- An RPC answering for another chain than the one recorded for the network (hardhat-deploy's `.chain` or `.chainId`, `scan.json`, the proxy index; not under `HARDHAT_FORK`) fails the network instead of finding no proxies, and a proxy the index knows that the chain no longer shows as one is reported as an error.
+- The validations cache is removed while a build runs and written back only once every compiled job was validated, and only a build of every contract starts a new one. A failed, interrupted or partial build forces a full recompile instead of leaving contracts silently out of the cache.
+- A contract missing from the validations cache (or no cache at all) fails `validate-upgrade` and `record-baseline` instead of being skipped.
+- Store files are written atomically, and a damaged one is named in the error.
+- `upgradesValidator.explorers.*.apiKey` accepts a `configVariable(...)`, read only when a baseline has to be rebuilt. `ChainBaselineOptions.explorer` (`/onchain`) also takes a function, called only then.
 - `@openzeppelin/upgrades-core` 1.46.0 (from 1.45.0-alpha.1). It fixes the ERC-7201 location computed for some namespace ids, which only the check against a contract's `layout at` base slot uses; stored layouts key namespaces by id, so existing records stay valid.
 
 ### Breaking (alpha)
 
-- Requires Hardhat 3.6 or later (the same floor as hardhat-deploy 2.0.30).
+- Requires Hardhat 3.6 or later (the same floor as hardhat-deploy 2.0.30) and Node.js 22.
+- Offline, a proxy the proxy index knows whose implementation has no layout record fails `validate-upgrade` and throws `BaselineUnavailableError` from the proxy helpers, instead of passing as a first deployment. The compile hook reports it as skipped.
 - The deploy hook and `record-baseline` write `.storage-layouts/` records; they no longer write `upgradeStorageLayout`. The field is still read as a deprecated fallback.
 - `record-baseline` needs an RPC, and `--force` no longer skips the bytecode check.
 - `validate-upgrade --all` covers every proxy found on the chain (offline: in the proxy index), not only those with a stamped baseline. The `implementation` deployment field is no longer read.

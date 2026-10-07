@@ -8,7 +8,7 @@ Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzep
 
 - Hardhat **v3.6** or later
 - hardhat-deploy **v2** (optional; the proxy helper works with any deploy tool)
-- Node.js **>= 18**
+- Node.js **22** or later (Hardhat 3 enforces its exact minimum)
 
 ## Installation
 
@@ -62,7 +62,7 @@ The plugin operates through four validation paths, all backed by the same storag
 | **`assertProxyUpgrade`**    | Scripts, CI, tests | Throws if storage is incompatible; typically used just before upgrading            |
 | **`validateProxyUpgrade`**  | Scripts, CI, tests | Same, returns a result instead of throwing                                         |
 
-The ValidationData cache (written to `cache/validations.json` on each compile) is shared across all four paths so build-info files are parsed only once per compile.
+The ValidationData cache (`cache/hardhat-upgrades-validator/validations.json`) is shared across all four paths so build-info files are parsed only once per compile. Hardhat caches a compilation job before the plugin validates it, so the file is removed while a build runs and written back only when every job that compiled was validated (solc errors in a file do not count; Hardhat recompiles those files anyway). A build that throws, is interrupted, or meets a contract `validate()` cannot handle leaves no cache, and only a build of every contract starts a new one, so a partial build (`hardhat build <file>`, a tests-only build) never passes for a complete cache. Without a cache, or without a contract in it, `validate-upgrade`, `record-baseline` and the proxy helpers fail for that contract rather than skip it.
 
 ### Where the baseline comes from
 
@@ -84,6 +84,7 @@ hardhat-deploy v2 records no implementation address, and its file names (`X`, `X
 - Several files can share a proxy address (hardhat-deploy v2 writes `X` and `X_Proxy` there). A file whose code is the code at that address describes the proxy contract itself and is skipped; the others describe the code behind the proxy, and their artifact is the new side of the comparison. Immutables are masked for that comparison. Their positions come from the file, else the local build, else are inferred from the code (solc leaves each immutable as a zeroed `PUSH32` operand): hardhat-deploy v2's prebuilt proxy artifacts, such as its optimized transparent proxy with an immutable admin, list none.
 - A proxy whose only file describes the proxy contract itself is reported, not validated: nothing names its new code.
 - An address that cannot be read (an RPC error, a beacon whose `implementation()` reverts) is reported as an error for that address; the rest of the network is still validated.
+- The RPC must answer for the chain the deployments are on. If its chain id differs from one recorded for the network (hardhat-deploy's `.chain` or older `.chainId` file, `scan.json` or the proxy index), the network fails instead of finding no proxies. hardhat-deploy's fork mode (`HARDHAT_FORK`) is exempt: its fork keeps its own chain id. A proxy the index knows that the chain no longer shows as one, while a deployment still sits at its address, is an error too, never silently dropped.
 
 Runs that can reach the chain (`validate-upgrade --all`, `record-baseline`, the deploy hook) keep a **proxy index** under `.storage-layouts/proxies/`: which implementation each proxy ran when last observed, and which deployments describe its code. Offline runs read it. It is written only from what the chain reports, so a queued or discarded upgrade never moves it; it goes stale when a proxy is upgraded outside these runs, until the next run with an RPC, and offline results name the block it was observed at.
 
@@ -100,7 +101,7 @@ Runs that can reach the chain (`validate-upgrade --all`, `record-baseline`, the 
          baseline: chain, implementation 0x5fbd… (immutables-only, stored record)
 ```
 
-The compile hook always runs offline (compiling must not need an RPC), so it validates the proxies the proxy index lists, against stored records. An indexed implementation with no record is skipped, never replaced by the deprecated field. `validate-upgrade` and the proxy helpers read the chain, and may write under `deployments/<network>/.storage-layouts/` and download a compiler the first time they rebuild a layout.
+The compile hook always runs offline (compiling must not need an RPC), so it validates the proxies the proxy index lists, against stored records. An indexed implementation with no record is reported as skipped there, never replaced by the deprecated field; offline, `validate-upgrade` and the proxy helpers fail for it (`BaselineUnavailableError`), since a proxy the index knows is not a first deployment. `validate-upgrade` and the proxy helpers read the chain, and may write under `deployments/<network>/.storage-layouts/` and download a compiler the first time they rebuild a layout.
 
 Hardhat 3 gives every new connection (`network.create()`) to an in-process (EDR) network a fresh chain. In a deploy script running on such a network, pass the script's own provider (`assertProxyUpgrade(hre, "MyToken", { provider })`) so validation sees the same chain; the deploy hook cannot, and skips recording there.
 
@@ -143,7 +144,7 @@ export default deployScript(
 );
 ```
 
-After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read. A queued upgrade to a differently named contract (`MyToken` to `MyTokenV2`) is linked to its proxy only by file names, which are not trusted, so it is recorded once the upgrade has executed, by the next deploy, `record-baseline` or validation. Until every deployment on the network has been classified once without errors (by the deploy hook, `record-baseline --all` or `validate-upgrade --all`, recorded in `scan.json`), the deploy hook classifies all of them, so the index is complete from then on, even on a network with no proxies.
+After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read. A queued upgrade to a differently named contract (`MyToken` to `MyTokenV2`) is linked to its proxy only by file names, which are not trusted, so the deploy hook does not record it. Once the upgrade has executed, record it with `record-baseline --contract MyToken --from-chain` (or let validation rebuild it, with an explorer configured). A later deploy records it only if it rewrites `MyToken.json`; plain `record-baseline` records it only once `MyToken.json` names `MyTokenV2`. Until every deployment on the network has been classified once without errors (by the deploy hook, `record-baseline --all` or `validate-upgrade --all`, recorded in `scan.json`), the deploy hook classifies all of them, so the index is complete from then on, even on a network with no proxies.
 
 ### Standard upgrade
 
@@ -229,16 +230,22 @@ upgradesValidator: {
   // Etherscan indexes; set it for an Etherscan-compatible explorer (e.g.
   // Blockscout). apiKey falls back to ETHERSCAN_API_KEY for Etherscan only:
   // that key is never sent to another host, and a custom apiUrl may be keyless.
+  // apiKey takes a string or a configVariable("...") from hardhat/config,
+  // which is read only when a baseline has to be rebuilt (a variable that
+  // cannot be read then is an error, not "no key").
   explorers: {
-    mainnet: { apiKey: process.env.ETHERSCAN_API_KEY },
+    mainnet: { apiKey: configVariable("ETHERSCAN_API_KEY") },
     someL2: { apiUrl: "https://blockscout.example.org/api", apiKey: "..." },
   },
 
-  // Where downloaded compilers are cached. Hardhat's own compiler cache is
-  // checked first, so a version the project already compiled with is free.
+  // Where compilers for rebuilding verified source are cached. Hardhat's own
+  // compiler cache is checked after it, so a version the project already
+  // compiled with needs no download.
   solcCacheDir: undefined, // default: <os cache>/hardhat-upgrades-validator/compilers
 },
 ```
+
+The compile hook's second, namespaced compilation goes through Hardhat's `compileBuildInfo`, which for solc downloads the compiler by version: a compiler `path` configured for the project is not used, so an offline machine with a custom compiler fails that pass (and the build). Other compiler types (solx, for example) need Hardhat 3.10 or later for it.
 
 Only standard-json verifications can be rebuilt: flattened and multi-file verifications do not record every compiler setting (`viaIR` among them). For those implementations, record the layout with `record-baseline` from a matching local build.
 
@@ -481,7 +488,12 @@ const { record } = await resolveChainBaseline(proxyAddress, {
 
 // New layout: from your build-info.
 const solc = await getSolc(buildInfo.solcLongVersion);
-const newLayout = await layoutFromSource(buildInfo.input, solc, "contracts/MyToken.sol:MyToken");
+// Hardhat 3 build-info keys project sources as "project/<path>".
+const newLayout = await layoutFromSource(
+  buildInfo.input,
+  solc,
+  "project/contracts/MyToken.sol:MyToken",
+);
 
 const result = validateStorageUpgrade("MyToken", record.layout, newLayout, { kind: "uups" });
 ```
@@ -496,6 +508,7 @@ Behavior changes:
 
 - The deploy hook and `record-baseline` write `.storage-layouts/` records and the proxy index instead of `upgradeStorageLayout`.
 - `record-baseline` needs an RPC for the network, and `--force` no longer skips the bytecode check: it only allows overwriting an existing record.
+- Offline, a proxy the proxy index knows whose implementation has no layout record fails validation instead of passing as a first deployment.
 - `validate-upgrade --all` covers every proxy found on the chain (or, offline, in the proxy index), not only those with a stamped baseline. An `implementation` field in a deployment file is ignored.
 
 ## License
