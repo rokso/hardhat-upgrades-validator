@@ -8,7 +8,12 @@
  * - records the layout of the implementation each such proxy runs;
  * - records the layout of a freshly deployed implementation whose upgrade is
  *   still pending (e.g. queued in a multisig), when its contract is the one
- *   some proxy's deployment describes.
+ *   some proxy's deployment describes. A queued upgrade to a differently
+ *   named contract is recorded once the upgrade executes and a later deploy
+ *   or record-baseline sees it.
+ *
+ * The first run with no proxy index classifies every deployment once, so the
+ * index exists from then on.
  *
  * A record is written only when the chain runs the local build, so
  * implementations deployed through the plugin never need an explorer to be
@@ -35,7 +40,11 @@ import {
 import { getInMemoryValidations } from "./compile.js";
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
 import { probe } from "../internals/baseline.js";
-import { discoverProxies, updateProxyIndex } from "../internals/proxy-discovery.js";
+import {
+  artifactCodeLookup,
+  discoverProxies,
+  updateProxyIndex,
+} from "../internals/proxy-discovery.js";
 import { recordLocalBuild } from "../../core/onchain/baseline.js";
 import { layoutStoreDir, listProxyEntries, readLayoutRecord } from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
@@ -114,13 +123,24 @@ async function recordImplementationLayouts(
       if (address !== undefined) changedAddresses.add(address);
     }
 
-    const discovered = await discoverProxies(provider, deployments, changedAddresses);
+    // With no index yet (the first deploy after adopting the plugin), look at
+    // every deployment once, so a queued upgrade's implementation can be told
+    // apart from an unrelated contract.
+    const storeDir = layoutStoreDir(deploymentsDir);
+    const bootstrap = (await listProxyEntries(storeDir)).length === 0;
+    const { proxies: discovered, errors } = await discoverProxies(provider, deployments, {
+      ...(bootstrap ? {} : { only: changedAddresses }),
+      localCode: artifactCodeLookup(hre.artifacts),
+    });
+    for (const e of errors) {
+      logger.warn(`Could not classify ${e.address} (${e.deployments.join(", ")}): ${e.reason}`);
+    }
     await updateProxyIndex(deploymentsDir, provider, discovered);
 
-    const recorder = makeRecorder(hre, provider, layoutStoreDir(deploymentsDir));
+    const recorder = makeRecorder(hre, provider, storeDir);
 
     // What each changed proxy runs now, from the deployments describing its code.
-    for (const proxy of discovered) {
+    for (const proxy of discovered.filter((p) => changedAddresses.has(p.proxy))) {
       for (const name of proxy.deployments) {
         const deployment = deployments.get(name)!;
         if (await recorder(proxy.implementation, resolveArtifactName(deployment, name), name)) {

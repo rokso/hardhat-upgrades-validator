@@ -273,13 +273,14 @@ async function runAutoValidation(
 
   let anyErrors = false;
   let anyValidated = false;
+  let skipped = 0;
   const cache = createBuildInfoOutputCache();
 
   for (const network of networkDirs) {
     const deploymentsDir = resolve(deploymentsBase, network);
     let contractNames: string[];
     try {
-      contractNames = await listProxyDeployments(deploymentsDir);
+      ({ names: contractNames } = await listProxyDeployments(deploymentsDir));
     } catch (err) {
       logger.error(`Could not read the proxy index for "${network}": ${(err as Error).message}`);
       anyErrors = true;
@@ -310,7 +311,11 @@ async function runAutoValidation(
         continue;
       }
       const oldLayout = baseline.layout;
-      if (oldLayout === undefined) continue;
+      if (oldLayout === undefined) {
+        logger.log(`  [SKIP] "${network}/${name}": ${baseline.reason ?? "no baseline."}`);
+        skipped++;
+        continue;
+      }
 
       const artifactName = resolveArtifactName(deployment, name);
 
@@ -366,7 +371,11 @@ async function runAutoValidation(
   }
 
   if (anyValidated && !anyErrors) {
-    logger.log("[OK] All storage layout checks passed.\n");
+    logger.log(
+      skipped === 0
+        ? "[OK] All storage layout checks passed.\n"
+        : `[OK] Storage layout checks passed; ${skipped} skipped (see above).\n`,
+    );
   } else if (anyErrors) {
     console.log(); // blank line after last error block
   }

@@ -1,0 +1,16 @@
+{
+  "name": "hhuv-fixture-gen",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@openzeppelin/contracts": "5.4.0",
+    "@openzeppelin/contracts-upgradeable": "5.4.0",
+    "@rocketh/deploy": "0.20.1",
+    "@rocketh/node": "0.21.4",
+    "@rocketh/proxy": "0.20.1",
+    "hardhat": "3.18.1",
+    "hardhat-deploy": "2.0.30",
+    "rocketh": "0.23.1",
+    "typescript": "~5.9.0"
+  }
+}

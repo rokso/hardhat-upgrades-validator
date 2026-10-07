@@ -81,8 +81,9 @@ Deployed code never changes, so a record keyed by implementation address cannot 
 hardhat-deploy v2 records no implementation address, and its file names (`X`, `X_Proxy`, `X_Implementation`) are a convention, not something to trust. So proxies are found from the chain and file contents only:
 
 - A deployment is a proxy when the chain has an ERC-1967 implementation or beacon slot set at its address. A bare implementation or a plain contract has neither, and is skipped.
-- Several files can share a proxy address (hardhat-deploy v2 writes `X` and `X_Proxy` there). A file whose code is the code at that address describes the proxy contract itself and is skipped; the others describe the code behind the proxy, and their artifact is the new side of the comparison.
+- Several files can share a proxy address (hardhat-deploy v2 writes `X` and `X_Proxy` there). A file whose code is the code at that address describes the proxy contract itself and is skipped; the others describe the code behind the proxy, and their artifact is the new side of the comparison. Immutables are masked for that comparison. Their positions come from the file, else the local build, else are inferred from the code (solc leaves each immutable as a zeroed `PUSH32` operand): hardhat-deploy v2's prebuilt proxy artifacts, such as its optimized transparent proxy with an immutable admin, list none.
 - A proxy whose only file describes the proxy contract itself is reported, not validated: nothing names its new code.
+- An address that cannot be read (an RPC error, a beacon whose `implementation()` reverts) is reported as an error for that address; the rest of the network is still validated.
 
 Runs that can reach the chain (`validate-upgrade --all`, `record-baseline`, the deploy hook) keep a **proxy index** under `.storage-layouts/proxies/`: which implementation each proxy ran when last observed, and which deployments describe its code. Offline runs read it. It is written only from what the chain reports, so a queued or discarded upgrade never moves it; it goes stale when a proxy is upgraded outside these runs, until the next run with an RPC, and offline results name the block it was observed at.
 
@@ -142,7 +143,7 @@ export default deployScript(
 );
 ```
 
-After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read.
+After the deploy, the deploy hook looks at the deployment files the deploy created or changed. For each proxy among them it updates the proxy index and records the layout of the implementation it runs, once it has proven the chain runs the local build. A freshly deployed implementation whose upgrade is still queued (in a multisig, say) is recorded too, when its contract is one a known proxy's deployment describes; if that upgrade is never executed, the record is simply never read. A queued upgrade to a differently named contract (`MyToken` to `MyTokenV2`) is linked to its proxy only by file names, which are not trusted, so it is recorded once the upgrade has executed, by the next deploy, `record-baseline` or validation. The first deploy with no proxy index classifies every deployment once, creating the index.
 
 ### Standard upgrade
 

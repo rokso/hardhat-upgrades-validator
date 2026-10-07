@@ -35,6 +35,8 @@ export interface ResolvedBaseline {
   layout: StorageLayout | undefined;
   info: BaselineInfo;
   warnings: ValidationWarning[];
+  /** Why there is no layout, when one was expected. */
+  reason?: string;
 }
 
 export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBaseline> {
@@ -127,8 +129,9 @@ export async function probe(provider: EthProvider): Promise<void> {
 }
 
 // Offline: the record for the implementation the proxy index says the proxy
-// ran when last observed. Without an index entry, the deprecated field. With
-// an entry but no record, nothing: another layout would describe other code.
+// ran when last observed. Without an index entry for the address, the
+// deprecated field. Otherwise nothing: another layout would describe code the
+// proxy was not running.
 async function offlineBaseline(
   ctx: BaselineContext,
   warnings: ValidationWarning[],
@@ -136,11 +139,22 @@ async function offlineBaseline(
   const address = ctx.deployment?.address;
   const storeDir = layoutStoreDir(ctx.deploymentsDir);
   const entry = address !== undefined ? await readProxyEntry(storeDir, address) : undefined;
-  if (entry === undefined || !entry.deployments.includes(ctx.name)) {
-    return deploymentFileBaseline(ctx, warnings);
+  if (entry === undefined) return deploymentFileBaseline(ctx, warnings);
+  if (!entry.deployments.includes(ctx.name)) {
+    return none(
+      warnings,
+      `the proxy index lists ${entry.deployments.map((n) => `"${n}"`).join(", ")} as the code ` +
+        `behind ${entry.proxy}, not "${ctx.name}".`,
+    );
   }
   const record = await readLayoutRecord(storeDir, entry.implementation);
-  if (record === undefined) return { layout: undefined, info: { source: "none" }, warnings };
+  if (record === undefined) {
+    return none(
+      warnings,
+      `no layout record for ${entry.implementation}, the implementation as of block ` +
+        `${entry.observedAtBlock}. Run record-baseline or validate-upgrade with a reachable network.`,
+    );
+  }
   return {
     layout: record.layout,
     info: {
@@ -151,6 +165,10 @@ async function offlineBaseline(
     },
     warnings,
   };
+}
+
+function none(warnings: ValidationWarning[], reason: string): ResolvedBaseline {
+  return { layout: undefined, info: { source: "none" }, warnings, reason };
 }
 
 function deploymentFileBaseline(

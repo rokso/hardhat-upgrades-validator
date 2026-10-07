@@ -107,6 +107,40 @@ export function compareDeployedBytecode(
   return "none";
 }
 
+const PUSH1 = 0x60;
+const PUSH32 = 0x7f;
+
+/**
+ * Immutable positions inferred from compiler output that does not list them,
+ * e.g. prebuilt artifacts shipped without `immutableReferences`.
+ *
+ * solc reads every immutable with a PUSH32 whose operand it leaves zeroed in
+ * the compiled code, and never emits PUSH32 for a zero constant (a shorter
+ * push does), so each zero PUSH32 operand in the instruction stream is an
+ * immutable. The walk stops at the CBOR metadata. Use the compiler's
+ * `immutableReferences` whenever available; this is for classification, where
+ * a wrong guess can only make two different codes look alike, never hide a
+ * difference outside these spans.
+ */
+export function inferImmutableReferences(compiled: string): ImmutableReferences {
+  const linked = normalize(compiled).replace(LINK_PLACEHOLDER, "0".repeat(40));
+  const hex = stripBytecodeMetadata(linked).replace(/^0x/, "");
+  const code = Buffer.from(hex, "hex");
+  const spans: Array<{ start: number; length: number }> = [];
+  for (let pc = 0; pc < code.length; pc++) {
+    const op = code[pc];
+    if (op < PUSH1 || op > PUSH32) continue;
+    const size = op - PUSH1 + 1;
+    if (op === PUSH32 && pc + 1 + size <= code.length) {
+      if (code.subarray(pc + 1, pc + 1 + size).every((b) => b === 0)) {
+        spans.push({ start: pc + 1, length: size });
+      }
+    }
+    pc += size;
+  }
+  return spans.length === 0 ? {} : { inferred: spans };
+}
+
 // Returns undefined when the hex is malformed or a span falls outside the code.
 function maskSpans(
   hex: string,

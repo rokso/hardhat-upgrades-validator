@@ -5,7 +5,13 @@ import prettier from "eslint-config-prettier";
 
 export default [
   {
-    ignores: ["dist/**", "node_modules/**", "test/fixtures/artifacts/**", "test/fixtures/cache/**"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "test/fixtures/artifacts/**",
+      "test/fixtures/cache/**",
+      "test/fixtures/rocketh/**",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

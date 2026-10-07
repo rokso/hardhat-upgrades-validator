@@ -27,9 +27,11 @@ import {
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
 import { probe, resolveBaseline } from "../internals/baseline.js";
 import {
+  artifactCodeLookup,
   classifyDeployment,
-  isIndexedLogic,
+  indexedRole,
   listProxyDeployments,
+  type LocalCodeLookup,
 } from "../internals/proxy-discovery.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import type { EthProvider } from "../../core/onchain/types.js";
@@ -112,9 +114,21 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
           ? provider
           : undefined;
 
+      const localCode = artifactCodeLookup(hre.artifacts);
       let contractNames: string[];
       try {
-        contractNames = all ? await listProxyDeployments(deploymentsDir, chain) : [contract!];
+        if (all) {
+          const listed = await listProxyDeployments(deploymentsDir, chain, localCode);
+          contractNames = listed.names;
+          for (const e of listed.errors) {
+            logger.log(
+              `  [ERROR] "${networkName}" ${e.address} (${e.deployments.map((n) => `"${n}"`).join(", ")}): ${e.reason}`,
+            );
+            hasErrors = true;
+          }
+        } else {
+          contractNames = [contract!];
+        }
       } catch (e) {
         logger.log(
           `  [ERROR] "${networkName}": could not discover proxies: ${(e as Error).message}`,
@@ -138,7 +152,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
             hre,
             cache,
             validations,
-            { provider, chain, discovered: all },
+            { provider, chain, discovered: all, localCode },
             opts,
           );
         } catch (e) {
@@ -183,6 +197,7 @@ interface ChainAccess {
   chain: EthProvider | undefined;
   /** The name came from proxy discovery, so it is already known to be a proxy's code. */
   discovered: boolean;
+  localCode: LocalCodeLookup;
 }
 
 async function validateContract(
@@ -198,7 +213,7 @@ async function validateContract(
   const deployment = await readDeployment(deploymentsDir, name);
 
   if (deployment !== null && !access.discovered) {
-    const skip = await whyNotProxyCode(name, deployment, deploymentsDir, access.chain);
+    const skip = await whyNotProxyCode(name, deployment, deploymentsDir, access);
     if (skip !== undefined) {
       logger.log(`  [SKIP] "${name}": ${skip}`);
       return null;
@@ -217,8 +232,10 @@ async function validateContract(
 
   if (baseline.layout === undefined && deployment !== null) {
     logger.log(
-      `  [SKIP] "${name}": no baseline. The chain could not supply one and no offline record exists. ` +
-        `Run validate-upgrade with a reachable network, or record-baseline.`,
+      baseline.reason !== undefined
+        ? `  [SKIP] "${name}": no baseline: ${baseline.reason}`
+        : `  [SKIP] "${name}": no baseline. The chain could not supply one and no offline record exists. ` +
+            `Run validate-upgrade with a reachable network, or record-baseline.`,
     );
     for (const w of baseline.warnings) {
       if (w.kind === "chain-baseline-unavailable") logger.log(`         reason: ${w.reason}`);
@@ -284,10 +301,10 @@ async function whyNotProxyCode(
   name: string,
   deployment: DeploymentFile,
   deploymentsDir: string,
-  chain: EthProvider | undefined,
+  { chain, localCode }: ChainAccess,
 ): Promise<string | undefined> {
   if (chain !== undefined) {
-    const { role } = await classifyDeployment(chain, deployment);
+    const { role } = await classifyDeployment(chain, name, deployment, localCode);
     if (role === "not-proxy") {
       return "not a proxy on this chain (no ERC-1967 implementation or beacon slot).";
     }
@@ -296,7 +313,11 @@ async function whyNotProxyCode(
     }
     return undefined;
   }
+  const indexed = await indexedRole(deploymentsDir, name, deployment);
+  if (indexed === "logic") return undefined;
+  if (indexed === "other") {
+    return "the proxy index lists another deployment as the code behind this proxy.";
+  }
   if (deployment.upgradeStorageLayout !== undefined) return undefined;
-  if (await isIndexedLogic(deploymentsDir, name, deployment)) return undefined;
   return "not known as a proxy's code offline. Run with a reachable network, or record-baseline.";
 }

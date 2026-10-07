@@ -30,8 +30,9 @@ vi.mock("../src/plugin/validations-cache.js", () => ({
 
 vi.mock("../src/plugin/internals/proxy-discovery.js", () => ({
   listProxyDeployments: vi.fn(),
+  artifactCodeLookup: vi.fn(),
   classifyDeployment: vi.fn(),
-  isIndexedLogic: vi.fn(),
+  indexedRole: vi.fn(),
 }));
 
 vi.mock("../src/core/validator.js", () => ({
@@ -86,7 +87,7 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vutest-"));
   vi.clearAllMocks();
   // Default stubs — individual tests override as needed.
-  vi.mocked(listProxyDeployments).mockResolvedValue([]);
+  vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [] });
   vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   vi.mocked(readDeployment).mockResolvedValue(null);
 });
@@ -136,7 +137,7 @@ describe("argument validation", () => {
 
   it("returns early (no error) when --all is true but no deployments exist", async () => {
     const hre = makeHre(tmpDir);
-    vi.mocked(listProxyDeployments).mockResolvedValue([]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [] });
     await expect(
       validateUpgradeAction(
         {
@@ -159,7 +160,7 @@ describe("argument validation", () => {
 
 describe("unsafeAllow token parsing", () => {
   beforeEach(() => {
-    vi.mocked(listProxyDeployments).mockResolvedValue(["MyContract"]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({ names: ["MyContract"], errors: [] });
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   });
@@ -249,7 +250,7 @@ describe("unsafeAllow token parsing", () => {
 
 describe("proxyKind override parsing", () => {
   beforeEach(() => {
-    vi.mocked(listProxyDeployments).mockResolvedValue(["MyContract"]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({ names: ["MyContract"], errors: [] });
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   });

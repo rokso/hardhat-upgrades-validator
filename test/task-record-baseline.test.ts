@@ -312,6 +312,47 @@ describe("proxy index", () => {
   });
 });
 
+describe("discovery failures", () => {
+  const PROXY2 = "0x00000000000000000000000000000000000000dd";
+
+  it("reports a failing address as an error and still records the others", async () => {
+    await writeDeployment("Broken", { address: PROXY2 });
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED, [PROXY2]: PROXY_CODE },
+      implementations: { [PROXY]: IMPL },
+      beacons: { [PROXY2]: "0x00000000000000000000000000000000000000ee" }, // implementation() reverts
+    });
+
+    await recordBaselineAction(
+      { ...baseArgs, contract: undefined, all: true },
+      makeHre(chain) as never,
+    );
+
+    expect(await readRecord(IMPL)).toBeDefined();
+    expect(logs.join("\n")).toMatch(/\[ERROR\] 0x0+dd \("Broken"\)/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("records even when the proxy index cannot be written", async () => {
+    await mkdir(join(deploymentsDir, ".storage-layouts", "proxies"), { recursive: true });
+    await writeFile(
+      join(deploymentsDir, ".storage-layouts", "proxies", `${PROXY}.json`),
+      JSON.stringify({ format: 2 }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+
+    await recordBaselineAction(baseArgs, makeHre(chain) as never);
+
+    expect(await readRecord(IMPL)).toBeDefined();
+    expect(warn.mock.calls.flat().join("\n")).toMatch(/Could not update the proxy index/);
+    expect(process.exitCode).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Existing records
 // ---------------------------------------------------------------------------

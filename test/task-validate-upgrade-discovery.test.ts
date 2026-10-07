@@ -41,18 +41,21 @@ const files = {
     contractName: "Box",
     sourceName: "src/Box.sol",
     deployedBytecode: LOGIC_CODE,
+    immutableReferences: {},
   },
   Box_Proxy: {
     address: PROXY,
     contractName: "ERC1967Proxy",
     sourceName: "src/ERC1967Proxy.sol",
     deployedBytecode: PROXY_CODE,
+    immutableReferences: {},
   },
   Box_Implementation: {
     address: IMPL,
     contractName: "Box",
     sourceName: "src/Box.sol",
     deployedBytecode: LOGIC_CODE,
+    immutableReferences: {},
   },
 };
 
@@ -163,6 +166,28 @@ describe("validate-upgrade --all", () => {
 
     expect(validated()).toEqual([]);
     expect(logs.join("\n")).toMatch(/No proxy deployments found/);
+  });
+});
+
+describe("validate-upgrade --all discovery errors", () => {
+  it("reports a failing address as an error and validates the rest", async () => {
+    const BROKEN = "0x00000000000000000000000000000000000000dd";
+    await writeFile(
+      join(deploymentsDir, "Broken.json"),
+      JSON.stringify({ address: BROKEN }),
+      "utf8",
+    );
+    const provider = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: LOGIC_CODE, [BROKEN]: PROXY_CODE },
+      implementations: { [PROXY]: IMPL },
+      beacons: { [BROKEN]: "0x00000000000000000000000000000000000000ee" },
+    });
+
+    await validateUpgradeAction(args({ all: true }), makeHre(provider) as never);
+
+    expect(validated()).toEqual(["src/Box.sol:Box"]);
+    expect(logs.join("\n")).toMatch(/\[ERROR\] "mainnet" 0x0+dd \("Broken"\)/);
+    expect(process.exitCode).toBe(1);
   });
 });
 

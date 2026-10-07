@@ -14,8 +14,9 @@ import { tmpdir } from "node:os";
 import {
   classifyDeployment,
   discoverProxies,
-  isIndexedLogic,
+  indexedRole,
   listProxyDeployments,
+  type LocalCodeLookup,
 } from "../src/plugin/internals/proxy-discovery.js";
 import { readDeployments } from "../src/plugin/internals/deployment-files.js";
 import { listProxyEntries, readProxyEntry, updateProxyEntry } from "../src/core/onchain/store.js";
@@ -23,14 +24,16 @@ import { makeMockChain, type MockChainState } from "./helpers/mock-chain.js";
 
 const PROXY = "0x00000000000000000000000000000000000000aa";
 const IMPL = "0x00000000000000000000000000000000000000bb";
+const PROXY2 = "0x00000000000000000000000000000000000000cc";
 const BEACON = "0x00000000000000000000000000000000000000ee";
 const PLAIN = "0x00000000000000000000000000000000000000ff";
 
 const LOGIC_CODE = "0x6080604052" + "11".repeat(32);
-// A proxy contract with an immutable (e.g. an admin address) at byte 4.
-const PROXY_COMPILED = "0x60806040" + "00".repeat(20) + "cd".repeat(8);
-const PROXY_IMMUTABLES = { "3": [{ start: 4, length: 20 }] };
-const PROXY_ONCHAIN = "0x60806040" + "99".repeat(20) + "cd".repeat(8);
+// A proxy contract reading an immutable (e.g. an admin address) with a PUSH32
+// whose operand, at byte 6, solc leaves zeroed.
+const PROXY_COMPILED = "0x6080604052" + "7f" + "00".repeat(32) + "cd".repeat(8);
+const PROXY_IMMUTABLES = { "3": [{ start: 6, length: 32 }] };
+const PROXY_ONCHAIN = "0x6080604052" + "7f" + "00".repeat(12) + "99".repeat(20) + "cd".repeat(8);
 
 const boxFiles = {
   Box: {
@@ -38,6 +41,7 @@ const boxFiles = {
     contractName: "Box",
     sourceName: "src/Box.sol",
     deployedBytecode: LOGIC_CODE,
+    immutableReferences: {},
   },
   Box_Proxy: {
     address: PROXY,
@@ -51,14 +55,30 @@ const boxFiles = {
     contractName: "Box",
     sourceName: "src/Box.sol",
     deployedBytecode: LOGIC_CODE,
+    immutableReferences: {},
   },
   Plain: {
     address: PLAIN,
     contractName: "Plain",
     sourceName: "src/Plain.sol",
     deployedBytecode: "0x00",
+    immutableReferences: {},
   },
 };
+
+// The local build, as Hardhat artifacts would give it.
+const localBuild: LocalCodeLookup = async (_name, d) =>
+  d.contractName === "TransparentProxy"
+    ? { deployedBytecode: PROXY_COMPILED, immutableReferences: PROXY_IMMUTABLES }
+    : d.contractName === "Box"
+      ? { deployedBytecode: LOGIC_CODE, immutableReferences: {} }
+      : undefined;
+
+function without<T extends object>(d: T, key: keyof T): Partial<T> {
+  const copy: Partial<T> = { ...d };
+  delete copy[key];
+  return copy;
+}
 
 const chainState = (): MockChainState => ({
   blockNumber: 7,
@@ -76,6 +96,9 @@ async function writeDeployments(files: Record<string, object>) {
   }
 }
 
+const discover = async (state = chainState(), localCode?: LocalCodeLookup) =>
+  discoverProxies(makeMockChain(state), await readDeployments(deploymentsDir), { localCode });
+
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-discovery-"));
   deploymentsDir = join(tmpDir, "deployments", "mainnet");
@@ -84,16 +107,16 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await rm(tmpDir, { recursive: true });
 });
 
 describe("discoverProxies", () => {
   it("finds the proxy and the file describing its code, not the proxy contract's own file", async () => {
-    const found = await discoverProxies(
-      makeMockChain(chainState()),
-      await readDeployments(deploymentsDir),
-    );
-    expect(found).toEqual([{ proxy: PROXY, implementation: IMPL, deployments: ["Box"] }]);
+    expect(await discover()).toEqual({
+      proxies: [{ proxy: PROXY, implementation: IMPL, deployments: ["Box"] }],
+      errors: [],
+    });
   });
 
   it("does not rely on names: renamed files classify the same", async () => {
@@ -104,11 +127,9 @@ describe("discoverProxies", () => {
       VaultFrontDoor: boxFiles.Box_Proxy,
       Box_Proxy: boxFiles.Box_Implementation, // a misleading name for the implementation
     });
-    const found = await discoverProxies(
-      makeMockChain(chainState()),
-      await readDeployments(deploymentsDir),
-    );
-    expect(found).toEqual([{ proxy: PROXY, implementation: IMPL, deployments: ["Vault"] }]);
+    expect((await discover()).proxies).toEqual([
+      { proxy: PROXY, implementation: IMPL, deployments: ["Vault"] },
+    ]);
   });
 
   it("follows a beacon proxy to its beacon's implementation", async () => {
@@ -116,73 +137,114 @@ describe("discoverProxies", () => {
     state.implementations = {};
     state.beacons = { [PROXY]: BEACON };
     state.beaconImplementations = { [BEACON]: IMPL };
-    const found = await discoverProxies(
-      makeMockChain(state),
-      await readDeployments(deploymentsDir),
-    );
-    expect(found).toEqual([
+    expect((await discover(state)).proxies).toEqual([
       { proxy: PROXY, implementation: IMPL, beacon: BEACON, deployments: ["Box"] },
     ]);
-  });
-
-  it("treats a file without code at a proxy address as describing the logic", async () => {
-    await writeDeployments({ Box: { address: PROXY } });
-    const found = await discoverProxies(
-      makeMockChain(chainState()),
-      await readDeployments(deploymentsDir),
-    );
-    expect(found[0].deployments).toEqual(["Box"]);
-  });
-
-  it("reads only the requested addresses", async () => {
-    const chain = makeMockChain(chainState());
-    await discoverProxies(chain, await readDeployments(deploymentsDir), new Set([PLAIN]));
-    const touched = chain.send.mock.calls.map(([, params]) => String((params as unknown[])[0]));
-    expect(touched.every((a) => a === PLAIN)).toBe(true);
   });
 
   it("warns about a proxy whose only file describes the proxy contract itself", async () => {
     await rm(join(deploymentsDir, "Box.json"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const found = await discoverProxies(
-      makeMockChain(chainState()),
-      await readDeployments(deploymentsDir),
-    );
-    expect(found).toEqual([]);
+    expect(await discover()).toEqual({ proxies: [], errors: [] });
     expect(warn.mock.calls.flat().join("\n")).toMatch(/no deployment describes the code behind it/);
-    warn.mockRestore();
+  });
+
+  it("reads only the requested addresses", async () => {
+    const chain = makeMockChain(chainState());
+    await discoverProxies(chain, await readDeployments(deploymentsDir), {
+      only: new Set([PLAIN]),
+    });
+    const touched = chain.send.mock.calls.map(([, params]) => String((params as unknown[])[0]));
+    expect(touched.every((a) => a === PLAIN)).toBe(true);
   });
 
   it("skips an address with a slot set but no code", async () => {
     const state = chainState();
     delete state.code![PROXY];
-    const found = await discoverProxies(
-      makeMockChain(state),
-      await readDeployments(deploymentsDir),
-    );
-    expect(found).toEqual([]);
+    expect(await discover(state)).toEqual({ proxies: [], errors: [] });
+  });
+});
+
+describe("files missing code or immutable positions", () => {
+  it("takes the proxy's immutable positions from the local build", async () => {
+    await writeDeployments({ Box_Proxy: without(boxFiles.Box_Proxy, "immutableReferences") });
+    const lookup = vi.fn(localBuild);
+    expect((await discover(chainState(), lookup)).proxies).toEqual([
+      { proxy: PROXY, implementation: IMPL, deployments: ["Box"] },
+    ]);
+    expect(lookup).toHaveBeenCalledWith("Box_Proxy", expect.anything());
+  });
+
+  it("infers immutable positions from zeroed PUSH32 operands when nothing lists them", async () => {
+    // As hardhat-deploy v2 ships its prebuilt proxy artifacts.
+    await writeDeployments({ Box_Proxy: without(boxFiles.Box_Proxy, "immutableReferences") });
+    expect(await discover()).toEqual({
+      proxies: [{ proxy: PROXY, implementation: IMPL, deployments: ["Box"] }],
+      errors: [],
+    });
+  });
+
+  it("takes missing code from the local build, which can show the file is the proxy's own", async () => {
+    await writeDeployments({ Box_Proxy: without(boxFiles.Box_Proxy, "deployedBytecode") });
+    expect((await discover(chainState(), localBuild)).proxies[0].deployments).toEqual(["Box"]);
+  });
+
+  it("treats a file with no code anywhere as describing the logic", async () => {
+    await writeDeployments({ Box: { address: PROXY } });
+    expect((await discover()).proxies[0].deployments).toEqual(["Box"]);
+  });
+});
+
+describe("per-address failures", () => {
+  it("reports a broken beacon for its address and still finds the other proxies", async () => {
+    await writeDeployments({
+      Other: { ...boxFiles.Box, address: PROXY2 },
+    });
+    const state = chainState();
+    state.code![PROXY2] = PROXY_ONCHAIN;
+    state.beacons = { [PROXY2]: BEACON }; // implementation() reverts: no beaconImplementations
+    const { proxies, errors } = await discover(state);
+    expect(proxies.map((p) => p.proxy)).toEqual([PROXY]);
+    expect(errors).toEqual([
+      { address: PROXY2, deployments: ["Other"], reason: expect.stringMatching(/beacon/) },
+    ]);
+  });
+
+  it("reports an RPC failure at one address without failing the rest", async () => {
+    await writeDeployments({ Other: { ...boxFiles.Box, address: PROXY2 } });
+    const chain = makeMockChain(chainState());
+    const send = chain.send.getMockImplementation()!;
+    chain.send.mockImplementation(async (method: string, params: unknown[] = []) => {
+      if (String(params[0]).toLowerCase() === PROXY2) throw new Error("rate limited");
+      return send(method, params);
+    });
+    const { proxies, errors } = await discoverProxies(chain, await readDeployments(deploymentsDir));
+    expect(proxies.map((p) => p.proxy)).toEqual([PROXY]);
+    expect(errors.map((e) => [e.address, e.reason])).toEqual([[PROXY2, "rate limited"]]);
   });
 });
 
 describe("classifyDeployment", () => {
   it("tells the three roles apart", async () => {
     const chain = makeMockChain(chainState());
-    expect(await classifyDeployment(chain, boxFiles.Box)).toEqual({
+    expect(await classifyDeployment(chain, "Box", boxFiles.Box)).toEqual({
       role: "logic",
       proxy: PROXY,
       state: { implementation: IMPL },
     });
-    expect(await classifyDeployment(chain, boxFiles.Box_Proxy)).toEqual({ role: "proxy-contract" });
-    expect(await classifyDeployment(chain, boxFiles.Box_Implementation)).toEqual({
-      role: "not-proxy",
+    expect(await classifyDeployment(chain, "Box_Proxy", boxFiles.Box_Proxy)).toEqual({
+      role: "proxy-contract",
     });
-    expect(await classifyDeployment(chain, boxFiles.Plain)).toEqual({ role: "not-proxy" });
+    expect(
+      await classifyDeployment(chain, "Box_Implementation", boxFiles.Box_Implementation),
+    ).toEqual({ role: "not-proxy" });
+    expect(await classifyDeployment(chain, "Plain", boxFiles.Plain)).toEqual({ role: "not-proxy" });
   });
 });
 
 describe("listProxyDeployments", () => {
   it("online: discovers from the chain and writes the proxy index", async () => {
-    const names = await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
+    const { names } = await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
     expect(names).toEqual(["Box"]);
     expect(await readProxyEntry(storeDir(), PROXY)).toEqual({
       format: 1,
@@ -194,30 +256,43 @@ describe("listProxyDeployments", () => {
     });
   });
 
-  it("offline: lists what the index names, plus files with the deprecated field", async () => {
+  it("online: a failed index write is a warning, not a failed discovery", async () => {
+    await mkdir(join(storeDir(), "proxies"), { recursive: true });
+    await writeFile(join(storeDir(), "proxies", `${PROXY}.json`), JSON.stringify({ format: 2 }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { names } = await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
+
+    expect(names).toEqual(["Box"]);
+    expect(warn.mock.calls.flat().join("\n")).toMatch(/Could not update the proxy index/);
+  });
+
+  it("offline: lists what the index names, plus deprecated-field files at unindexed addresses", async () => {
     await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
     await writeDeployments({
       Legacy: { address: PLAIN, upgradeStorageLayout: { storage: [], types: {} } },
+      // At an indexed proxy, but not one the index lists: never validated against its field.
+      Box_Proxy: { ...boxFiles.Box_Proxy, upgradeStorageLayout: { storage: [], types: {} } },
     });
 
-    expect(await listProxyDeployments(deploymentsDir)).toEqual(["Box", "Legacy"]);
+    expect((await listProxyDeployments(deploymentsDir)).names).toEqual(["Box", "Legacy"]);
   });
 
   it("offline: drops an indexed name whose file now points elsewhere", async () => {
     await listProxyDeployments(deploymentsDir, makeMockChain(chainState()));
     await writeDeployments({ Box: { ...boxFiles.Box, address: PLAIN } }); // redeployed
 
-    expect(await listProxyDeployments(deploymentsDir)).toEqual([]);
+    expect((await listProxyDeployments(deploymentsDir)).names).toEqual([]);
   });
 
   it("offline with no index lists nothing but deprecated-field files", async () => {
-    expect(await listProxyDeployments(deploymentsDir)).toEqual([]);
+    expect((await listProxyDeployments(deploymentsDir)).names).toEqual([]);
     expect(await listProxyEntries(storeDir())).toEqual([]);
   });
 });
 
-describe("isIndexedLogic", () => {
-  it("is true only for a name the index lists for that address", async () => {
+describe("indexedRole", () => {
+  it("separates listed names, other names at an indexed address, and unknown addresses", async () => {
     await updateProxyEntry(storeDir(), {
       format: 1,
       proxy: PROXY,
@@ -226,10 +301,10 @@ describe("isIndexedLogic", () => {
       deployments: ["Box"],
       observedAtBlock: 1,
     });
-    expect(await isIndexedLogic(deploymentsDir, "Box", boxFiles.Box)).toBe(true);
-    expect(await isIndexedLogic(deploymentsDir, "Box_Proxy", boxFiles.Box_Proxy)).toBe(false);
-    expect(await isIndexedLogic(deploymentsDir, "Box", { ...boxFiles.Box, address: PLAIN })).toBe(
-      false,
+    expect(await indexedRole(deploymentsDir, "Box", boxFiles.Box)).toBe("logic");
+    expect(await indexedRole(deploymentsDir, "Box_Proxy", boxFiles.Box_Proxy)).toBe("other");
+    expect(await indexedRole(deploymentsDir, "Box", { ...boxFiles.Box, address: PLAIN })).toBe(
+      "unknown",
     );
   });
 });

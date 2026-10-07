@@ -9,9 +9,10 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 - Bytecode comparison masks immutables (`immutables-only`), so UUPS implementations (`UUPSUpgradeable.__self`) match on-chain code. A match only after stripping metadata (`metadata-only`) is reported but never accepted as proof of a layout, and metadata is only stripped when the tail is a CBOR map.
 - Once the chain names a proxy's implementation, only that implementation's layout is used; `auto` never substitutes another implementation's record.
 - Explorer outages, HTTP 429/5xx, unsupported chains and compiler-download failures count as "unavailable"; rejected API keys and checksum failures are hard errors. `ETHERSCAN_API_KEY` is never sent to a non-Etherscan `apiUrl`, and custom explorers may be keyless.
-- Proxies are discovered from the chain (ERC-1967 implementation or beacon slot) and file contents, never from file names or an `implementation` field, which hardhat-deploy v2 does not write. Of several files at one proxy address, the one whose code is the proxy's own is skipped.
+- Proxies are discovered from the chain (ERC-1967 implementation or beacon slot) and file contents, never from file names or an `implementation` field, which hardhat-deploy v2 does not write. Of several files at one proxy address, the one whose code is the proxy's own is skipped, with immutable positions inferred when a prebuilt proxy artifact lists none. A failure at one address is reported for that address only.
 - A proxy index under `.storage-layouts/proxies/` records which implementation each proxy ran when last observed, so the compile hook and other offline runs pick the right record. Offline results name the block it was observed at.
-- The deploy hook looks only at deployment files the deploy changed, and also records freshly deployed implementations whose upgrade is still queued.
+- The deploy hook looks only at deployment files the deploy changed, and also records freshly deployed implementations whose upgrade is still queued (same contract name; a renamed contract is recorded once its upgrade executes).
+- The compile hook names every proxy it skips and no longer prints "All storage layout checks passed" when it skipped any.
 - `record-baseline --from-chain` rebuilds records from verified source for proxies running code the local tree has moved past.
 - New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, usable from plain ESM scripts and other tooling.
 - New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.

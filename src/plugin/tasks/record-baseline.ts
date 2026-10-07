@@ -29,9 +29,13 @@ import {
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
 import {
+  artifactCodeLookup,
+  classifyDeployment,
   discoverProxies,
   updateProxyIndex,
   type DiscoveredProxy,
+  type DiscoveryError,
+  type LocalCodeLookup,
 } from "../internals/proxy-discovery.js";
 import { loadValidationsFromDisk } from "../internals/validations-cache.js";
 import { explorerConfig, probe } from "../internals/baseline.js";
@@ -102,13 +106,24 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
     try {
       let found: Targets;
       try {
-        found = await findTargets(provider!, deployments, all ? undefined : contract!);
+        found = await findTargets(
+          provider!,
+          deployments,
+          all ? undefined : contract!,
+          artifactCodeLookup(hre.artifacts),
+        );
       } catch (e) {
         logger.log(
           `  [ERROR] "${networkName}": could not discover proxies: ${(e as Error).message}`,
         );
         anyFailed = true;
         continue;
+      }
+      for (const e of found.errors) {
+        logger.log(
+          `  [ERROR] ${e.address} (${e.deployments.map((n) => `"${n}"`).join(", ")}): ${e.reason}`,
+        );
+        anyFailed = true;
       }
       await updateProxyIndex(deploymentsDir, provider!, found.discovered);
       const { targets } = found;
@@ -154,6 +169,7 @@ interface Targets {
   discovered: DiscoveredProxy[];
   /** (deployment name, its proxy) pairs to record. */
   targets: Array<[string, DiscoveredProxy]>;
+  errors: DiscoveryError[];
 }
 
 // For a single contract, logs why it is skipped when it is not the code behind a proxy.
@@ -161,34 +177,36 @@ async function findTargets(
   provider: EthProvider,
   deployments: Map<string, DeploymentFile>,
   contract: string | undefined,
+  localCode: LocalCodeLookup,
 ): Promise<Targets> {
   if (contract === undefined) {
-    const discovered = await discoverProxies(provider, deployments);
-    const targets = discovered.flatMap((p) =>
+    const { proxies, errors } = await discoverProxies(provider, deployments, { localCode });
+    const targets = proxies.flatMap((p) =>
       p.deployments.map((n): [string, DiscoveredProxy] => [n, p]),
     );
-    return { discovered, targets };
+    return { discovered: proxies, targets, errors };
   }
-  const address = deployments.get(contract)?.address?.toLowerCase();
-  if (address === undefined) {
+  const deployment = deployments.get(contract);
+  const address = deployment?.address?.toLowerCase();
+  if (deployment === undefined || address === undefined) {
     logger.log(`  [SKIP] "${contract}": no deployment file with an address.`);
-    return { discovered: [], targets: [] };
+    return { discovered: [], targets: [], errors: [] };
   }
-  const discovered = await discoverProxies(provider, deployments, new Set([address]));
-  const [proxy] = discovered;
-  if (proxy === undefined) {
+  const { proxies, errors } = await discoverProxies(provider, deployments, {
+    only: new Set([address]),
+    localCode,
+  });
+  const proxy = proxies[0];
+  if (errors.length === 0 && (proxy === undefined || !proxy.deployments.includes(contract))) {
+    const { role } = await classifyDeployment(provider, contract, deployment, localCode);
     logger.log(
-      `  [SKIP] "${contract}": ${address} has no ERC-1967 implementation or beacon slot set on this chain.`,
+      role === "proxy-contract"
+        ? `  [SKIP] "${contract}": describes the proxy contract itself; record the deployment that describes the code behind it${proxy ? ` (${proxy.deployments.join(", ")})` : ""}.`
+        : `  [SKIP] "${contract}": ${address} has no ERC-1967 implementation or beacon slot set on this chain.`,
     );
-    return { discovered, targets: [] };
+    return { discovered: proxies, targets: [], errors };
   }
-  if (!proxy.deployments.includes(contract)) {
-    logger.log(
-      `  [SKIP] "${contract}": describes the proxy contract itself; record the deployment that describes the code behind it (${proxy.deployments.join(", ")}).`,
-    );
-    return { discovered, targets: [] };
-  }
-  return { discovered, targets: [[contract, proxy]] };
+  return { discovered: proxies, targets: proxy ? [[contract, proxy]] : [], errors };
 }
 
 async function recordBaseline(

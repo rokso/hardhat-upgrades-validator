@@ -198,14 +198,18 @@ describe("resolveBaseline", () => {
     );
     expect(r.layout).toBeUndefined();
     expect(r.info.source).toBe("none");
+    expect(r.reason).toMatch(/no layout record for 0x0+bb, the implementation as of block 42/);
   });
 
-  it("offline: an index entry for other deployments at the address does not apply", async () => {
+  it("offline: a file the index does not list for its proxy gets no baseline, not its deprecated field", async () => {
     // e.g. this file describes the proxy contract itself.
     await writeLayoutRecord(storeDir(), record(LIVE, liveLayout));
     await indexAt(LIVE, ["OtherName"]);
-    const r = await resolveBaseline(ctx());
+    const r = await resolveBaseline(
+      ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
+    );
     expect(r.layout).toBeUndefined();
+    expect(r.reason).toMatch(/lists "OtherName"/);
   });
 
   it("auto: with no proxy slot on-chain, falls back to the deprecated field, flagged", async () => {

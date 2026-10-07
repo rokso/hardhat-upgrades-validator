@@ -84,6 +84,7 @@ const proxyFiles = (impl: string) => ({
     contractName: "ERC1967Proxy",
     sourceName: "proxy/ERC1967Proxy.sol",
     deployedBytecode: PROXY_CODE,
+    immutableReferences: {},
   },
   MyContract_Implementation: { address: impl, ...logicArtifact },
 });
@@ -274,6 +275,25 @@ describe("upgrades", () => {
     );
 
     expect(await readIndex(deploymentsDir, PROXY)).toMatchObject({ observedAtBlock: 100 });
+  });
+});
+
+describe("first deploy after adopting the plugin", () => {
+  it("records a queued upgrade's implementation even with no proxy index yet", async () => {
+    // Deployed before the plugin: no index, no records.
+    await writeDeployments(deploymentsDir, proxyFiles(IMPL));
+
+    await deployOverride(
+      {},
+      makeHre(liveChain()) as never,
+      deploying({ MyContract_Implementation: proxyFiles(NEW_IMPL).MyContract_Implementation }),
+    );
+
+    expect(await readRecord(deploymentsDir, NEW_IMPL)).toMatchObject({ address: NEW_IMPL });
+    // Bootstrapped from the chain: the proxy still runs IMPL.
+    expect(await readIndex(deploymentsDir, PROXY)).toMatchObject({ implementation: IMPL });
+    // Unchanged proxies are indexed, but their implementations are not recorded here.
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
   });
 });
 
