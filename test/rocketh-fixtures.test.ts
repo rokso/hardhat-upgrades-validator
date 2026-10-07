@@ -130,7 +130,7 @@ describe("deploy hook on real hardhat-deploy v2 output", () => {
         }),
       },
       network: {
-        connect: vi.fn().mockResolvedValue({
+        create: vi.fn().mockResolvedValue({
           provider,
           networkConfig: { type: "http" },
           close: vi.fn().mockResolvedValue(undefined),

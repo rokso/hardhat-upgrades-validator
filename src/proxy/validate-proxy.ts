@@ -121,7 +121,7 @@ async function withProvider(
   fn: (provider: EthProvider | undefined) => Promise<ResolvedBaseline>,
 ): Promise<ResolvedBaseline> {
   if (provider !== undefined || mode === "deployment") return fn(provider);
-  const connection = await hre.network?.connect().catch(() => undefined);
+  const connection = await hre.network?.create().catch(() => undefined);
   try {
     return await fn(connection?.provider);
   } finally {

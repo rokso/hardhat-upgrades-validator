@@ -6,7 +6,7 @@ Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzep
 
 ## Requirements
 
-- Hardhat **v3**
+- Hardhat **v3.6** or later
 - hardhat-deploy **v2** (optional; the proxy helper works with any deploy tool)
 - Node.js **>= 18**
 
@@ -102,7 +102,7 @@ Runs that can reach the chain (`validate-upgrade --all`, `record-baseline`, the 
 
 The compile hook always runs offline (compiling must not need an RPC), so it validates the proxies the proxy index lists, against stored records. An indexed implementation with no record is skipped, never replaced by the deprecated field. `validate-upgrade` and the proxy helpers read the chain, and may write under `deployments/<network>/.storage-layouts/` and download a compiler the first time they rebuild a layout.
 
-Hardhat 3 gives every `network.connect()` to an in-process (EDR) network a fresh chain. In a deploy script running on such a network, pass the script's own provider (`assertProxyUpgrade(hre, "MyToken", { provider })`) so validation sees the same chain; the deploy hook cannot, and skips recording there.
+Hardhat 3 gives every new connection (`network.create()`) to an in-process (EDR) network a fresh chain. In a deploy script running on such a network, pass the script's own provider (`assertProxyUpgrade(hre, "MyToken", { provider })`) so validation sees the same chain; the deploy hook cannot, and skips recording there.
 
 ## Workflow
 

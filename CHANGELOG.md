@@ -18,10 +18,12 @@ Chain-sourced baselines: the "before" layout is now the implementation each prox
 - `record-baseline --from-chain` rebuilds records from verified source for proxies running code the local tree has moved past.
 - New `hardhat-upgrades-validator/onchain` entry point with no Hardhat dependency, usable from plain ESM scripts and other tooling.
 - New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.
+- The compile hook uses only hooks Hardhat supports going forward: the solc outputs validation needs are requested through the resolved config, and `validate()` plus the namespaced compilation run in `getCompilationJobErrors`, compiling through Hardhat's `compileBuildInfo` (so WASM-only platforms work too). Connections use `network.create()`.
 - `@openzeppelin/upgrades-core` 1.46.0 (from 1.45.0-alpha.1). It fixes the ERC-7201 location computed for some namespace ids, which only the check against a contract's `layout at` base slot uses; stored layouts key namespaces by id, so existing records stay valid.
 
 ### Breaking (alpha)
 
+- Requires Hardhat 3.6 or later (the same floor as hardhat-deploy 2.0.30).
 - The deploy hook and `record-baseline` write `.storage-layouts/` records; they no longer write `upgradeStorageLayout`. The field is still read as a deprecated fallback.
 - `record-baseline` needs an RPC, and `--force` no longer skips the bytecode check.
 - `validate-upgrade --all` covers every proxy found on the chain (offline: in the proxy index), not only those with a stamped baseline. The `implementation` deployment field is no longer read.

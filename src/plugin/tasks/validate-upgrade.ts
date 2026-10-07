@@ -104,7 +104,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
 
     // Opened in every mode: which deployments are proxies comes from the
     // chain when it is reachable, even when the baseline does not.
-    const networkConnection = await hre.network.connect(networkName).catch(() => undefined);
+    const networkConnection = await hre.network.create(networkName).catch(() => undefined);
 
     try {
       const provider = networkConnection?.provider;

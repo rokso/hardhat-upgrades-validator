@@ -75,7 +75,7 @@ function makeHre(provider: { send: unknown } | undefined) {
     config: { paths: { root: tmpDir, cache: join(tmpDir, "cache") } },
     artifacts: {},
     network: {
-      connect: vi
+      create: vi
         .fn()
         .mockImplementation(() =>
           provider === undefined

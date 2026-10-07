@@ -60,7 +60,7 @@ function makeHre(root: string) {
     globalOptions: { network: "localhost" },
     config: { paths: { root, cache: join(root, "cache") } },
     network: {
-      connect: vi.fn().mockImplementation(() => Promise.reject(new Error("no network"))),
+      create: vi.fn().mockImplementation(() => Promise.reject(new Error("no network"))),
     },
     artifacts: {},
   };

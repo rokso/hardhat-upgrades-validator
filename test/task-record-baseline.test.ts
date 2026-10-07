@@ -106,7 +106,7 @@ function makeHre(provider: { send: unknown } | undefined, config: Record<string,
       }),
     },
     network: {
-      connect: vi
+      create: vi
         .fn()
         .mockImplementation(() =>
           provider === undefined
@@ -518,7 +518,7 @@ describe("network override", () => {
 
     await recordBaselineAction({ ...baseArgs, network: "mainnet" }, hre as never);
 
-    expect(hre.network.connect).toHaveBeenCalledWith("mainnet");
+    expect(hre.network.create).toHaveBeenCalledWith("mainnet");
     expect(await readRecord(IMPL)).toBeUndefined(); // localhost untouched
     const mainnetRecord = await readFile(
       join(mainnetDir, ".storage-layouts", "implementations", `${IMPL}.json`),

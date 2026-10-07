@@ -6,26 +6,25 @@
  * every network directory under `deployments/`, against the freshly compiled
  * layout. Offline only. Any errors cause `process.exitCode = 1`.
  *
- * Also hooks `invokeSolc` to perform a second "namespaced" compilation pass
- * (same approach as @openzeppelin/hardhat-upgrades) so that types used only
- * in namespace structs get proper `numberOfBytes` in the extracted layout.
- *
- * Additionally runs oz-core's `validate()` during each solc invocation while
- * we have the full SolcOutput, SolcInput, and solcVersion in hand. Results
- * are merged into a single ValidationData (same format as hardhat-upgrades'
- * cache/validations.json) and persisted to disk so the deploy hook and tasks
- * can use them without re-parsing build-info files.
+ * Also handles `getCompilationJobErrors`, which sees each compilation job's
+ * solc input and full output, to run oz-core's `validate()` on it. Before
+ * that it runs a second "namespaced" compilation (same approach as
+ * @openzeppelin/hardhat-upgrades) through Hardhat's `compileBuildInfo`, so
+ * types used only in namespace structs get proper `numberOfBytes` in the
+ * extracted layout. Results are merged into a single ValidationData (same
+ * format as hardhat-upgrades' cache/validations.json) and persisted to disk
+ * so the deploy hook and tasks can use them without re-parsing build-info
+ * files. The solc outputs this needs are requested by the config hook.
  */
 
-import type { HookContext } from "hardhat/types/hooks";
-import type { SolcConfig } from "hardhat/types/config";
+import type { HookContext, SolidityHooks } from "hardhat/types/hooks";
 import {
   type BuildOptions,
+  type CompilationJob,
   type CompilationJobCreationError,
   type FileBuildResult,
   type CompilerInput,
   type CompilerOutput,
-  type Compiler,
   FileBuildResultType,
 } from "hardhat/types/solidity";
 import {
@@ -58,7 +57,7 @@ import { listSubdirsOrEmpty } from "../../utils/io.js";
 import { logger } from "../../utils/logger.js";
 
 // ---------------------------------------------------------------------------
-// In-memory ValidationData store (populated by invokeSolc, consumed by build)
+// In-memory ValidationData store (populated per compilation job, consumed by build)
 // Mirrors the approach in @openzeppelin/hardhat-upgrades/utils/validations.ts
 // ---------------------------------------------------------------------------
 
@@ -90,15 +89,10 @@ function toCompilerInput(input: SolcInput): CompilerInput {
 }
 
 // ---------------------------------------------------------------------------
-// invokeSolc hook
+// getCompilationJobErrors hook
 // ---------------------------------------------------------------------------
 
-type InvokeSolcNext = (
-  ctx: HookContext,
-  compiler: Compiler,
-  input: CompilerInput,
-  config: SolcConfig,
-) => Promise<CompilerOutput>;
+type JobErrorsNext = Parameters<SolidityHooks["getCompilationJobErrors"]>[3];
 
 function isCompileHookEnabled(context: HookContext): boolean {
   return (
@@ -110,21 +104,32 @@ function isCompileHookEnabled(context: HookContext): boolean {
   );
 }
 
-async function invokeSolcHandler(
+// Runs once per compilation job that actually compiled (not cache hits),
+// after its artifacts are emitted and before build() returns. The job's
+// errors pass through untouched.
+async function getCompilationJobErrorsHandler(
   context: HookContext,
-  compiler: Compiler,
-  solcInput: CompilerInput,
-  solcConfig: SolcConfig,
-  next: InvokeSolcNext,
-): Promise<CompilerOutput> {
-  const output = await next(context, compiler, solcInput, solcConfig);
+  compilationJob: Readonly<CompilationJob>,
+  compilerOutput: Readonly<CompilerOutput>,
+  next: JobErrorsNext,
+): ReturnType<JobErrorsNext> {
+  const errors = await next(context, compilationJob, compilerOutput);
+  if (!isCompileHookEnabled(context)) return errors;
 
-  if (!isCompileHookEnabled(context)) return output;
-
-  // Skip partial/cached outputs: only process full solc output (has contracts
+  // Skip partial/failed outputs: only process full solc output (has contracts
   // with bytecode and sources with ASTs). Adapted from @openzeppelin/hardhat-upgrades.
-  if (!isFullSolcOutput(toSolcOutput(output))) return output;
+  const output = toSolcOutput(compilerOutput as CompilerOutput);
+  if (!isFullSolcOutput(output)) return errors;
 
+  await recordValidations(context, compilationJob, output);
+  return errors;
+}
+
+async function recordValidations(
+  context: HookContext,
+  compilationJob: Readonly<CompilationJob>,
+  output: SolcOutput,
+): Promise<void> {
   const {
     makeNamespacedInput,
     trySanitizeNatSpec,
@@ -133,34 +138,35 @@ async function invokeSolcHandler(
     solcInputOutputDecoder,
   } = await import("@openzeppelin/upgrades-core");
 
-  // --- Namespaced compilation pass ---
-  // Run a second solc pass so namespace struct members get proper slot/type
-  // info in the extracted layout (mirrors @openzeppelin/hardhat-upgrades).
-  let namespacedOutput: SolcOutput | undefined;
-  if (isNamespaceSupported(compiler.version)) {
-    try {
-      let namespacedInput = makeNamespacedInput(
-        toSolcInput(solcInput),
-        toSolcOutput(output),
-        compiler.version,
-      );
-      namespacedInput = await trySanitizeNatSpec(namespacedInput, compiler.version);
+  const version = compilationJob.solcConfig.version;
+  const input = toSolcInput(await compilationJob.getSolcInput());
 
-      const nsOut = await next(context, compiler, toCompilerInput(namespacedInput), solcConfig);
-      const nsErrors = (nsOut.errors ?? []).filter((e) => e.severity === "error");
-      if (nsErrors.length === 0) {
-        namespacedOutput = toSolcOutput(nsOut);
-      } else {
-        const msg = `Namespaced compilation produced errors (namespace layout types may be incomplete). First error: ${nsErrors[0].message}`;
-        throw new Error(`[hardhat-upgrades-validator] ${msg}`);
-      }
+  // --- Namespaced compilation pass ---
+  // A second solc pass so namespace struct members get proper slot/type info
+  // in the extracted layout (mirrors @openzeppelin/hardhat-upgrades). Errors
+  // fail the build: without it, namespace layouts would be silently incomplete.
+  let namespacedOutput: SolcOutput | undefined;
+  if (isNamespaceSupported(version)) {
+    let nsOut: CompilerOutput;
+    try {
+      const namespacedInput = await trySanitizeNatSpec(
+        makeNamespacedInput(input, output, version),
+        version,
+      );
+      nsOut = await compileNamespaced(context, compilationJob, toCompilerInput(namespacedInput));
     } catch (err) {
-      throw err instanceof Error
-        ? err
-        : new Error(
-            `[hardhat-upgrades-validator] Namespaced compilation failed (namespace layout types may be incomplete): ${err}`,
-          );
+      throw new Error(
+        `[hardhat-upgrades-validator] Namespaced compilation failed (namespace layout types may be incomplete): ${(err as Error).message ?? err}`,
+        { cause: err },
+      );
     }
+    const nsErrors = (nsOut.errors ?? []).filter((e) => e.severity === "error");
+    if (nsErrors.length > 0) {
+      throw new Error(
+        `[hardhat-upgrades-validator] Namespaced compilation produced errors (namespace layout types may be incomplete). First error: ${nsErrors[0].message}`,
+      );
+    }
+    namespacedOutput = toSolcOutput(nsOut);
   }
 
   // --- oz-core safety validation ---
@@ -170,20 +176,35 @@ async function invokeSolcHandler(
   // ValidationRunData. Merge into the module-level store so a single
   // validations.json is written at the end of the build (same as hardhat-upgrades).
   try {
-    const decodeSrc = solcInputOutputDecoder(toSolcInput(solcInput), toSolcOutput(output));
-    const runData = ozValidate(
-      toSolcOutput(output),
-      decodeSrc,
-      compiler.version,
-      toSolcInput(solcInput),
-      namespacedOutput,
-    );
+    const decodeSrc = solcInputOutputDecoder(input, output);
+    const runData = ozValidate(output, decodeSrc, version, input, namespacedOutput);
     inMemoryValidations = concatRunData(runData, inMemoryValidations ?? undefined);
   } catch (err) {
     logger.warn(`Safety validation step failed (contract-level checks may be skipped): ${err}`);
   }
+}
 
-  return output;
+// Compiles the namespaced input with the job's compiler version, through
+// Hardhat's own compiler selection (native or WASM). compileBuildInfo runs no
+// hooks and caches nothing, so this cannot recurse into the build.
+async function compileNamespaced(
+  context: HookContext,
+  compilationJob: Readonly<CompilationJob>,
+  input: CompilerInput,
+): Promise<CompilerOutput> {
+  const { type } = compilationJob.solcConfig;
+  return context.solidity.compileBuildInfo(
+    {
+      _format: "hh3-sol-build-info-1",
+      id: `${await compilationJob.getBuildId()}-namespaced`,
+      solcVersion: compilationJob.solcConfig.version,
+      solcLongVersion: compilationJob.solcLongVersion,
+      ...(type !== undefined && type !== "solc" ? { compilerType: type } : {}),
+      userSourceNameMap: {},
+      input,
+    },
+    { quiet: true },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -393,44 +414,9 @@ async function runAutoValidation(
   }
 }
 
-// ---------------------------------------------------------------------------
-// storageLayout + devdoc + ast output injection
-// ---------------------------------------------------------------------------
-
-const REQUIRED_CONTRACT_OUTPUTS = ["storageLayout", "devdoc"];
-const REQUIRED_FILE_OUTPUTS = ["ast"];
-
-async function injectRequiredOutputs(
-  _context: HookContext,
-  solcInput: CompilerInput,
-  next: (ctx: HookContext, input: CompilerInput) => Promise<CompilerInput>,
-): Promise<CompilerInput> {
-  const sel = solcInput.settings?.outputSelection;
-  if (sel !== undefined) {
-    for (const file of Object.keys(sel)) {
-      for (const contract of Object.keys(sel[file])) {
-        if (contract === "") continue;
-        for (const output of REQUIRED_CONTRACT_OUTPUTS) {
-          if (!sel[file][contract].includes(output)) {
-            sel[file][contract].push(output);
-          }
-        }
-      }
-      sel[file][""] ??= [];
-      for (const output of REQUIRED_FILE_OUTPUTS) {
-        if (!sel[file][""].includes(output)) {
-          sel[file][""].push(output);
-        }
-      }
-    }
-  }
-  return next(_context, solcInput);
-}
-
 export default async function () {
   return {
     build: buildHandler,
-    invokeSolc: invokeSolcHandler,
-    preprocessSolcInputBeforeBuilding: injectRequiredOutputs,
-  };
+    getCompilationJobErrors: getCompilationJobErrorsHandler,
+  } satisfies Partial<SolidityHooks>;
 }

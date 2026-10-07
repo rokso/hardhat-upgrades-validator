@@ -85,7 +85,7 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
     }
 
     // Records describe what the chain runs, so there is nothing to record without it.
-    const connection = await hre.network.connect(networkName).catch(() => undefined);
+    const connection = await hre.network.create(networkName).catch(() => undefined);
     const provider = connection?.provider;
     const reachable =
       provider !== undefined &&

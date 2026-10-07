@@ -98,7 +98,7 @@ async function recordImplementationLayouts(
     logger.log(`[INFO] HARDHAT_FORK is set; skipped recording implementation layouts.`);
     return;
   }
-  const connection = await hre.network.connect().catch(() => undefined);
+  const connection = await hre.network.create().catch(() => undefined);
   const provider = connection?.provider;
   try {
     // Each connection to an in-process network is a fresh chain, so the

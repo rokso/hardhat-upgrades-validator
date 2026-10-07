@@ -135,7 +135,7 @@ function makeHre(provider: { send: unknown } | undefined, type = "http") {
       getBuildInfoOutputPath: vi.fn().mockResolvedValue(undefined),
     },
     network: {
-      connect: vi.fn().mockImplementation(() =>
+      create: vi.fn().mockImplementation(() =>
         provider === undefined
           ? Promise.reject(new Error("no network"))
           : Promise.resolve({
