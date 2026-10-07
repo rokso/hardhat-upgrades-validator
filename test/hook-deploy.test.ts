@@ -410,6 +410,20 @@ describe("failure handling", () => {
     expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
   });
 
+  it("skips hardhat-deploy's fork mode, whose deployments exist only on the fork", async () => {
+    const chain = liveChain();
+    vi.stubEnv("HARDHAT_FORK", "mainnet");
+    try {
+      await deployOverride({}, makeHre(chain) as never, deploying(proxyFiles(IMPL)));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+    expect(await readIndex(deploymentsDir, PROXY)).toBeUndefined();
+    expect(chain.send).not.toHaveBeenCalled();
+  });
+
   it("skips in-process networks, whose fresh chain cannot hold what was deployed", async () => {
     const chain = liveChain();
     const result = await deployOverride(

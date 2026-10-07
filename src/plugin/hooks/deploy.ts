@@ -91,6 +91,13 @@ async function recordImplementationLayouts(
   if (changed.size === 0) return;
 
   const network = hre.globalOptions.network.trim();
+  // hardhat-deploy's fork mode deploys onto a fork of `network`: what it
+  // deployed exists only on the fork, so nothing may be recorded for the real
+  // network. (Recent versions do not save deployments there at all.)
+  if (process.env.HARDHAT_FORK) {
+    logger.log(`[INFO] HARDHAT_FORK is set; skipped recording implementation layouts.`);
+    return;
+  }
   const connection = await hre.network.connect().catch(() => undefined);
   const provider = connection?.provider;
   try {
