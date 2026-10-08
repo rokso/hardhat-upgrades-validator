@@ -1,6 +1,6 @@
 {
   "name": "hardhat-upgrades-validator",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Hardhat v3 plugin to validate storage layout compatibility when upgrading proxy contracts managed by hardhat-deploy v2",
   "license": "MIT",
   "type": "module",
