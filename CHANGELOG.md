@@ -14,6 +14,7 @@ All checks, tags and error messages are now OpenZeppelin's. This plugin keeps th
 - `--network` now applies to `validate-upgrade` and `record-baseline`.
 - `hardhat deploy` without `--network` no longer fails, and nothing is recorded under `HARDHAT_FORK`.
 - The compile hook names skipped contracts instead of reporting that all checks passed.
+- Deployment files are written atomically: a crash or Ctrl-C mid-write no longer leaves one cut off.
 - No deprecated Hardhat hooks; `@openzeppelin/upgrades-core` 1.46.0.
 
 ### Breaking (alpha)
