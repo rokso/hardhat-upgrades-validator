@@ -1,42 +1,65 @@
 /**
  * `record-baseline` task action.
  *
- * Extracts the OZ-format storage layout from the current compiled artifact
- * and stamps it into each deployment JSON file as `upgradeStorageLayout`.
+ * Writes a layout record for the implementation each proxy runs right now,
+ * keyed by implementation address under `deployments/<network>/.storage-layouts/`,
+ * and refreshes the proxy index offline runs read.
+ *
+ * - Default: the local build's layout, recorded only if the chain runs exactly
+ *   that build (immutables masked).
+ * - `--from-chain`: the layout rebuilt from the implementation's verified
+ *   source, for proxies whose code the local tree has moved past.
  *
  * Usage:
- *   npx hardhat record-baseline --all --network mainnet
- *   npx hardhat record-baseline --contract MyToken --network mainnet
+ *   npx hardhat record-baseline --all
+ *   npx hardhat record-baseline --contract MyToken --from-chain
  */
 
 import type { NewTaskActionFunction } from "hardhat/types/tasks";
 import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import {
-  readDeployment,
   getContractBuildData,
   createBuildInfoOutputCache,
-  compareBytecode,
+  readDeployments,
   resolveArtifactName,
   resolveDeploymentNetworks,
   selectedNetwork,
   ArtifactNotFoundError,
+  type DeploymentFile,
 } from "../internals/deployment-utils.js";
+import {
+  artifactCodeLookup,
+  discoverProxies,
+  lostIndexedProxies,
+  updateProxyIndex,
+  type DiscoveredProxy,
+  type DiscoveryError,
+  type LocalCodeLookup,
+} from "../internals/proxy-discovery.js";
 import { loadValidationsFromDisk, missingLayoutReason } from "../internals/validations-cache.js";
+import { explorerConfig, probe } from "../internals/baseline.js";
+import { assertSameChain } from "../internals/chain-identity.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
-import { listDirOrEmpty, readJsonFile, writeJsonFile } from "../../utils/io.js";
+import { recordLocalBuild, resolveImplementationLayout } from "../../core/onchain/baseline.js";
+import { layoutStoreDir, readLayoutRecord } from "../../core/onchain/store.js";
+import type { EthProvider } from "../../core/onchain/types.js";
+import type { ImmutableReferences } from "../../core/bytecode-utils.js";
 import { logger } from "../../utils/logger.js";
 
 interface RecordBaselineArgs {
   contract?: string;
   all: boolean;
   force: boolean;
+  fromChain?: boolean;
 }
 
+type Outcome = "recorded" | "skipped";
+
 const action: NewTaskActionFunction<RecordBaselineArgs> = async (
-  { contract, all, force },
+  { contract, all, force, fromChain = false },
   hre: HardhatRuntimeEnvironment,
 ) => {
   const projectRoot = hre.config.paths.root;
@@ -46,138 +69,240 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
 
   if (!all && (contract === undefined || contract === "")) {
     throw new Error(
-      "Provide --contract <name> to record a single contract, or --all to record every deployed contract.",
+      "Provide --contract <name> to record a single contract, or --all to record every deployed proxy.",
     );
   }
 
   let totalRecorded = 0;
   let totalSkipped = 0;
-  let totalFailed = 0;
+  let anyFailed = false;
   const cache = createBuildInfoOutputCache();
   const validations = await loadValidationsFromDisk(hre.config.paths.cache);
 
   for (const networkName of targetNetworks) {
     const deploymentsDir = resolve(deploymentsBase, networkName);
-
-    const contractNames = all ? await listAllDeployedContracts(deploymentsDir) : [contract!];
-
-    if (contractNames.length === 0) {
+    const deployments = await readDeployments(deploymentsDir);
+    if (deployments.size === 0) {
       logger.log(`[INFO] No deployments found in ${deploymentsDir}`);
       continue;
     }
 
-    for (const name of contractNames) {
-      const result = await recordBaseline(name, deploymentsDir, hre, cache, validations, force);
-      if (result === "recorded") totalRecorded++;
-      else if (result === "failed") totalFailed++;
-      else totalSkipped++;
+    // Records describe what the chain runs, so there is nothing to record without it.
+    const connection = await hre.network.create(networkName).catch(() => undefined);
+    const provider = connection?.provider;
+    const reachable =
+      provider !== undefined &&
+      (await probe(provider).then(
+        () => true,
+        () => false,
+      ));
+    if (!reachable) {
+      logger.log(
+        `  [ERROR] Network "${networkName}": no reachable RPC. record-baseline reads the live implementation, so it needs one.`,
+      );
+      await connection?.close().catch(() => {});
+      anyFailed = true;
+      continue;
+    }
+
+    try {
+      let found: Targets;
+      try {
+        found = await findTargets(
+          provider!,
+          deploymentsDir,
+          deployments,
+          all ? undefined : contract!,
+          artifactCodeLookup(hre.artifacts),
+        );
+      } catch (e) {
+        logger.log(`  [ERROR] "${networkName}": ${(e as Error).message}`);
+        anyFailed = true;
+        continue;
+      }
+      for (const e of found.errors) {
+        logger.log(
+          `  [ERROR] ${e.address} (${e.deployments.map((n) => `"${n}"`).join(", ")}): ${e.reason}`,
+        );
+        anyFailed = true;
+      }
+      await updateProxyIndex(deploymentsDir, provider!, found.discovered);
+      const { targets } = found;
+      if (targets.length === 0) {
+        if (all) logger.log(`[INFO] No proxy deployments found in ${deploymentsDir}`);
+        else totalSkipped++;
+        continue;
+      }
+
+      for (const [name, proxy] of targets) {
+        try {
+          const outcome = await recordBaseline(
+            name,
+            deployments.get(name)!,
+            proxy.implementation,
+            deploymentsDir,
+            networkName,
+            hre,
+            { provider: provider!, cache, validations, force, fromChain },
+          );
+          if (outcome === "recorded") totalRecorded++;
+          else totalSkipped++;
+        } catch (e) {
+          logger.log(`  [ERROR] "${name}": ${(e as Error).message}`);
+          anyFailed = true;
+        }
+      }
+    } finally {
+      await connection?.close().catch(() => {});
     }
   }
 
   logger.log(
-    `\n[INFO] Baseline recording complete: ${totalRecorded} recorded, ${totalSkipped} skipped` +
-      (totalFailed > 0 ? `, ${totalFailed} failed.` : "."),
+    `\n[INFO] Baseline recording complete: ${totalRecorded} recorded, ${totalSkipped} skipped.`,
   );
-  if (totalFailed > 0) process.exitCode = 1;
+  if (anyFailed) process.exitCode = 1;
 };
 
 export default action;
 
+interface Targets {
+  /** Every proxy found, for the index. */
+  discovered: DiscoveredProxy[];
+  /** (deployment name, its proxy) pairs to record. */
+  targets: Array<[string, DiscoveredProxy]>;
+  errors: DiscoveryError[];
+}
+
+// For a single contract, logs why it is skipped when it is not the code behind a proxy.
+async function findTargets(
+  provider: EthProvider,
+  deploymentsDir: string,
+  deployments: Map<string, DeploymentFile>,
+  contract: string | undefined,
+  localCode: LocalCodeLookup,
+): Promise<Targets> {
+  await assertSameChain(deploymentsDir, provider);
+  if (contract === undefined) {
+    const discovery = await discoverProxies(provider, deployments, { localCode });
+    const targets = discovery.proxies.flatMap((p) =>
+      p.deployments.map((n): [string, DiscoveredProxy] => [n, p]),
+    );
+    const errors = [
+      ...discovery.errors,
+      ...(await lostIndexedProxies(deploymentsDir, deployments, discovery)),
+    ];
+    return { discovered: discovery.proxies, targets, errors };
+  }
+  const deployment = deployments.get(contract);
+  const address = deployment?.address?.toLowerCase();
+  if (deployment === undefined || address === undefined) {
+    logger.log(`  [SKIP] "${contract}": no deployment file with an address.`);
+    return { discovered: [], targets: [], errors: [] };
+  }
+  const { proxies, unvalidated, errors } = await discoverProxies(provider, deployments, {
+    only: new Set([address]),
+    localCode,
+  });
+  const proxy = proxies[0];
+  if (errors.length > 0) return { discovered: proxies, targets: [], errors };
+  if (proxy?.deployments.includes(contract)) {
+    return { discovered: proxies, targets: [[contract, proxy]], errors };
+  }
+  logger.log(
+    proxy !== undefined
+      ? `  [SKIP] "${contract}": describes the proxy contract itself; record the deployment that describes the code behind it (${proxy.deployments.join(", ")}).`
+      : unvalidated.includes(address)
+        ? `  [SKIP] "${contract}": describes the proxy contract itself, and no deployment describes the code behind it.`
+        : `  [SKIP] "${contract}": ${address} has no ERC-1967 implementation or beacon slot set on this chain.`,
+  );
+  return { discovered: proxies, targets: [], errors };
+}
+
 async function recordBaseline(
   name: string,
+  deployment: DeploymentFile,
+  implementation: string,
   deploymentsDir: string,
+  networkName: string,
   hre: HardhatRuntimeEnvironment,
-  cache: ReturnType<typeof createBuildInfoOutputCache>,
-  validations: ValidationDataCurrent | undefined,
-  force: boolean,
-): Promise<"recorded" | "skipped" | "failed"> {
-  const deployment = await readDeployment(deploymentsDir, name);
-  if (deployment === null) {
-    logger.log(`  [SKIP] "${name}": no deployment file found.`);
+  ctx: {
+    provider: EthProvider;
+    cache: ReturnType<typeof createBuildInfoOutputCache>;
+    validations: ValidationDataCurrent | undefined;
+    force: boolean;
+    fromChain: boolean;
+  },
+): Promise<Outcome> {
+  const storeDir = layoutStoreDir(deploymentsDir);
+  if (!ctx.force && (await readLayoutRecord(storeDir, implementation)) !== undefined) {
+    logger.log(`  [SKIP] "${name}": implementation ${implementation} already recorded.`);
     return "skipped";
   }
 
-  if (deployment.upgradeStorageLayout !== undefined && !force) {
-    logger.log(`  [SKIP] "${name}": baseline already recorded. Use --force to overwrite.`);
-    return "skipped";
+  if (ctx.fromChain) {
+    const { record } = await resolveImplementationLayout(implementation, {
+      provider: ctx.provider,
+      storeDir,
+      explorer: () => explorerConfig(hre.config.upgradesValidator, networkName),
+      solc: { cacheDir: hre.config.upgradesValidator?.solcCacheDir },
+      refresh: ctx.force,
+    });
+    logger.log(
+      `  [OK]   "${name}": recorded ${implementation} from verified source (${record.contract}, ${record.bytecodeMatch}).`,
+    );
+    return "recorded";
   }
 
   const artifactName = resolveArtifactName(deployment, name);
-
-  let upgradeStorageLayout;
+  let layout;
+  let artifact;
   try {
-    ({ upgradeStorageLayout } = await getContractBuildData(
+    ({ upgradeStorageLayout: layout } = await getContractBuildData(
       artifactName,
       hre.artifacts,
-      validations,
-      cache,
+      ctx.validations,
+      ctx.cache,
     ));
+    artifact = (await hre.artifacts.readArtifact(artifactName)) as {
+      contractName: string;
+      sourceName: string;
+      deployedBytecode: string;
+      immutableReferences?: ImmutableReferences;
+    };
   } catch (err) {
-    // Not compiled here (e.g. a prebuilt proxy artifact): nothing to record.
+    // Not compiled here: nothing to record from the local build.
     if (err instanceof ArtifactNotFoundError) {
-      logger.log(`  [SKIP] "${name}": artifact not found. Run \`hardhat build\` first.`);
-      return "skipped";
-    }
-    logger.log(`  [ERROR] "${name}": ${(err as Error).message}`);
-    return "failed";
-  }
-
-  // A compiled contract with no layout is a failure, never "nothing to record".
-  if (upgradeStorageLayout === undefined) {
-    logger.log(`  [ERROR] "${name}": ${artifactName}: ${missingLayoutReason(validations)}`);
-    return "failed";
-  }
-
-  // Verify bytecode matches before trusting the local layout.
-  const artifactBytecode = (await hre.artifacts.readArtifact(artifactName)).deployedBytecode;
-  const deployedBytecode = deployment.deployedBytecode;
-
-  if (deployedBytecode === undefined || deployedBytecode === "") {
-    if (!force) {
       logger.log(
-        `  [SKIP] "${name}": deployment file has no deployedBytecode, cannot verify code matches on-chain.\n` +
-          `         Use --force to record anyway (risky if code has been updated since last deploy).`,
+        `  [SKIP] "${name}": artifact not found. Run \`hardhat build\` first, or use --from-chain.`,
       );
       return "skipped";
     }
-    logger.log(`  [WARN] "${name}": skipping bytecode check (--force).`);
-  } else {
-    const cmp = compareBytecode(deployedBytecode, artifactBytecode);
-    if (cmp.match === "none") {
-      if (!force) {
-        logger.log(
-          `  [WARN] "${name}": compiled bytecode does not match deployed bytecode.\n` +
-            `         The local code has likely been updated since the last deploy.\n` +
-            `         Check out the version that was deployed, then run record-baseline again.\n` +
-            `         Use --force to record anyway (only if you are certain the layout is correct).`,
-        );
-        return "skipped";
-      }
-      logger.log(`  [WARN] "${name}": bytecode mismatch ignored (--force).`);
-    } else if (cmp.match === "metadata-only") {
-      logger.log(
-        `  [INFO] "${name}": bytecode matches (metadata-only diff, likely compiler settings).`,
-      );
-    }
+    throw err;
   }
 
-  const deploymentPath = join(deploymentsDir, `${name}.json`);
-  const deploymentJson = await readJsonFile<Record<string, unknown>>(deploymentPath);
+  if (layout === undefined) {
+    throw new Error(`${artifactName}: ${missingLayoutReason(ctx.validations)}`);
+  }
 
-  deploymentJson.upgradeStorageLayout = upgradeStorageLayout;
-
-  await writeJsonFile(deploymentPath, deploymentJson, {
-    pretty: true,
-    trailingNewline: true,
+  const { bytecodeMatch, record } = await recordLocalBuild(ctx.provider, storeDir, implementation, {
+    contract: `${artifact.sourceName}:${artifact.contractName}`,
+    layout,
+    deployedBytecode: artifact.deployedBytecode,
+    immutableReferences: artifact.immutableReferences,
   });
-
+  if (record === undefined) {
+    const why =
+      bytecodeMatch === "metadata-only"
+        ? `matches the code ${implementation} runs only after stripping metadata, which does not prove its storage layout`
+        : `is not the code ${implementation} runs; the source has moved on since it was deployed`;
+    logger.log(
+      `  [WARN] "${name}": the local build ${why}.\n` +
+        `         Re-run with --from-chain to rebuild its layout from verified source.`,
+    );
+    return "skipped";
+  }
   logger.log(
-    `  [OK]   "${name}": baseline recorded (${upgradeStorageLayout.storage.length} variable(s)).`,
+    `  [OK]   "${name}": recorded ${implementation} from the local build (${record.bytecodeMatch}).`,
   );
   return "recorded";
-}
-
-async function listAllDeployedContracts(deploymentsDir: string): Promise<string[]> {
-  const files = await listDirOrEmpty(deploymentsDir);
-  return files.filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
 }

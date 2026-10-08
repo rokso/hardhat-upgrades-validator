@@ -16,7 +16,8 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/plugin/internals/validations-cache.js", () => ({
+vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
   loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -118,7 +119,7 @@ describe("validateProxyUpgrade", () => {
     vi.mocked(readDeployment).mockResolvedValue({ address: "0xold" } as never);
     mockBuildData(layoutWithNewVar);
     await expect(validateProxyUpgrade(makeHre() as never, "MyContract")).rejects.toThrow(
-      /deployed but has no upgradeStorageLayout baseline/,
+      /deployed but has no baseline/,
     );
   });
 

@@ -1,9 +1,9 @@
 /**
  * Proxy upgrade validation helpers for use in hardhat-deploy / rocketh deploy scripts.
  *
- * Both the old layout (from the recorded baseline) and the new layout (from
- * the validations cache) are resolved automatically; no need to pass them
- * explicitly.
+ * The old layout is the layout of the implementation the proxy runs now, read
+ * from the chain (offline: the proxy index's record), and the new layout comes
+ * from the validations cache; neither needs to be passed.
  *
  * Usage:
  *
@@ -20,6 +20,7 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 import { resolve } from "node:path";
 
 import type { ProxyKind, UnsafeAllowKind, ValidationResult } from "../types/validation.js";
+import type { EthProvider } from "../core/onchain/types.js";
 import {
   validateStorageUpgrade,
   formatValidationResult,
@@ -38,13 +39,23 @@ export class StorageLayoutError extends Error {
 }
 import {
   readDeployment,
+  readDeployments,
   getContractBuildData,
   createBuildInfoOutputCache,
   resolveArtifactName,
   selectedNetwork,
 } from "../plugin/internals/deployment-utils.js";
-import { loadValidationsFromDisk } from "../plugin/internals/validations-cache.js";
+import {
+  loadValidationsFromDisk,
+  missingLayoutReason,
+} from "../plugin/internals/validations-cache.js";
 import { getInMemoryValidations } from "../plugin/hooks/compile.js";
+import { probe, resolveBaseline, type ResolvedBaseline } from "../plugin/internals/baseline.js";
+import {
+  artifactCodeLookup,
+  discoverProxies,
+  updateProxyIndex,
+} from "../plugin/internals/proxy-discovery.js";
 
 export interface ProxyUpgradeOptions {
   /** OZ error kinds to allow (same values as OZ's `unsafeAllow`). */
@@ -60,6 +71,12 @@ export interface ProxyUpgradeOptions {
   unsafeSkipStorageCheck?: boolean;
   /** Override the new implementation artifact name for this call only. */
   newImpl?: string;
+  /**
+   * Provider to read the chain with. Defaults to a new connection to the
+   * `--network` network. Pass the deploy script's own provider on an
+   * in-process network, where every new connection is a fresh chain.
+   */
+  provider?: EthProvider;
 }
 
 async function resolveLayouts(
@@ -76,14 +93,27 @@ async function resolveLayouts(
 
   const deploymentsDir = resolve(hre.config.paths.root, "deployments", network);
   const deployment = await readDeployment(deploymentsDir, contractName);
-  const oldLayout = deployment?.upgradeStorageLayout;
+
+  const baseline = await withProvider(hre, options.provider, async (provider) => {
+    if (provider !== undefined && deployment?.address !== undefined) {
+      await refreshIndex(hre, provider, deploymentsDir, deployment.address);
+    }
+    return resolveBaseline({
+      name: contractName,
+      deployment,
+      deploymentsDir,
+      networkName: network,
+      provider,
+      config: hre.config.upgradesValidator,
+    });
+  });
+
   // An existing deployment without a baseline is not a first deployment.
-  if (deployment !== null && oldLayout === undefined) {
+  if (deployment !== null && baseline.layout === undefined) {
     throw new Error(
-      `[hardhat-upgrades-validator] "${network}/${contractName}" is deployed but has no ` +
-        `upgradeStorageLayout baseline, so the upgrade cannot be checked. Run ` +
-        `\`hardhat record-baseline --contract ${contractName} --network ${network}\` ` +
-        `with the deployed code checked out.`,
+      `[hardhat-upgrades-validator] "${network}/${contractName}" is deployed but has no baseline, ` +
+        `so the upgrade cannot be checked. Run \`hardhat record-baseline --contract ` +
+        `${contractName} --network ${network}\` (with --from-chain if the local code has moved on).`,
     );
   }
 
@@ -102,7 +132,44 @@ async function resolveLayouts(
     unsafeAllow: options.unsafeAllow,
   });
 
-  return { oldLayout, newLayout, safetyErrors, proxyKind };
+  return { baseline, validations, newLayout, safetyErrors, proxyKind };
+}
+
+// Opens a connection to the --network network unless the caller passed a
+// provider. A failed connect, or an RPC that does not answer, means offline.
+async function withProvider(
+  hre: HardhatRuntimeEnvironment,
+  provider: EthProvider | undefined,
+  fn: (provider: EthProvider | undefined) => Promise<ResolvedBaseline>,
+): Promise<ResolvedBaseline> {
+  if (provider !== undefined) return fn(provider);
+  const connection = await hre.network?.create().catch(() => undefined);
+  try {
+    return await fn(connection?.provider);
+  } finally {
+    await connection?.close().catch(() => {});
+  }
+}
+
+// Every run that reads a proxy from the chain refreshes its index entry, so
+// offline runs see the state as of the last online one. Best effort: the
+// baseline itself is read from the chain right after.
+async function refreshIndex(
+  hre: HardhatRuntimeEnvironment,
+  provider: EthProvider,
+  deploymentsDir: string,
+  address: string,
+): Promise<void> {
+  try {
+    await probe(provider);
+    const { proxies } = await discoverProxies(provider, await readDeployments(deploymentsDir), {
+      only: new Set([address.toLowerCase()]),
+      localCode: artifactCodeLookup(hre.artifacts),
+    });
+    await updateProxyIndex(deploymentsDir, provider, proxies);
+  } catch {
+    // Offline or unclassifiable: resolveBaseline reports what matters.
+  }
 }
 
 export async function validateProxyUpgrade(
@@ -110,7 +177,7 @@ export async function validateProxyUpgrade(
   contractName: string,
   options: ProxyUpgradeOptions = {},
 ): Promise<ValidationResult> {
-  const { oldLayout, newLayout, safetyErrors, proxyKind } = await resolveLayouts(
+  const { baseline, validations, newLayout, safetyErrors, proxyKind } = await resolveLayouts(
     hre,
     contractName,
     options,
@@ -118,12 +185,12 @@ export async function validateProxyUpgrade(
 
   if (newLayout === undefined) {
     throw new Error(
-      `[hardhat-upgrades-validator] Storage layout for "${contractName}" not found in validation cache; run \`hardhat compile\` first.`,
+      `[hardhat-upgrades-validator] No storage layout for "${contractName}": ${missingLayoutReason(validations)}`,
     );
   }
 
-  return withSafetyErrors(
-    validateStorageUpgrade(contractName, oldLayout, newLayout, {
+  const result = withSafetyErrors(
+    validateStorageUpgrade(contractName, baseline.layout, newLayout, {
       unsafeAllow: options.unsafeAllow,
       unsafeAllowRenames: options.unsafeAllowRenames,
       unsafeSkipStorageCheck: options.unsafeSkipStorageCheck,
@@ -131,6 +198,9 @@ export async function validateProxyUpgrade(
     }),
     safetyErrors,
   );
+  result.baseline = baseline.info;
+  result.warnings.push(...baseline.warnings);
+  return result;
 }
 
 export async function assertProxyUpgrade(

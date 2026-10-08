@@ -36,18 +36,6 @@ export function stripBytecodeMetadata(bytecode: string): string {
   return "0x" + core.toString("hex");
 }
 
-export type BytecodeMatchResult =
-  | { match: "exact" }
-  | { match: "metadata-only" }
-  | { match: "none" };
-
-export function compareBytecode(a: string, b: string): BytecodeMatchResult {
-  const normalise = (s: string) => s.toLowerCase().replace(/^0x/, "");
-  if (normalise(a) === normalise(b)) return { match: "exact" };
-  if (stripBytecodeMetadata(a) === stripBytecodeMetadata(b)) return { match: "metadata-only" };
-  return { match: "none" };
-}
-
 function normalize(s: string): string {
   return s.toLowerCase().replace(/^0x/, "");
 }

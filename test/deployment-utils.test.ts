@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   stripBytecodeMetadata,
-  compareBytecode,
   readDeployment,
   resolveWinnerSource,
 } from "../src/plugin/internals/deployment-utils.js";
@@ -90,44 +89,6 @@ describe("stripBytecodeMetadata", () => {
 
   it("returns original for empty string", () => {
     expect(stripBytecodeMetadata("0x")).toBe("0x");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// compareBytecode
-// ---------------------------------------------------------------------------
-
-describe("compareBytecode", () => {
-  const coreHex = "60806040";
-
-  it("returns 'exact' for identical bytecode", () => {
-    const b = makeBytecode(coreHex, 8);
-    expect(compareBytecode(b, b).match).toBe("exact");
-  });
-
-  it("returns 'exact' regardless of 0x prefix or case", () => {
-    const b = makeBytecode(coreHex, 8);
-    const bUpper = b.toUpperCase();
-    expect(compareBytecode(b, bUpper).match).toBe("exact");
-    expect(compareBytecode(b.slice(2), b).match).toBe("exact"); // one without 0x
-  });
-
-  it("returns 'metadata-only' when only the CBOR suffix differs", () => {
-    const a = makeBytecode(coreHex, 8); // cbor filled with 0xaa
-    // Same core, different cbor content
-    const core = Buffer.from(coreHex, "hex");
-    const cbor = Buffer.alloc(8, 0xbb); // different fill
-    const lenBuf = Buffer.alloc(2);
-    lenBuf.writeUInt16BE(8, 0);
-    const b = "0x" + Buffer.concat([core, cbor, lenBuf]).toString("hex");
-
-    expect(compareBytecode(a, b).match).toBe("metadata-only");
-  });
-
-  it("returns 'none' when the core code differs", () => {
-    const a = makeBytecode("deadbeef", 8);
-    const b = makeBytecode("cafebabe", 8);
-    expect(compareBytecode(a, b).match).toBe("none");
   });
 });
 
