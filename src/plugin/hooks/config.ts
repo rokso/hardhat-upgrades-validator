@@ -1,6 +1,9 @@
 import type { ConfigHooks } from "hardhat/types/hooks";
-import type { SolidityConfig } from "hardhat/types/config";
-import type { UpgradesValidatorConfig } from "../../types/hardhat-type-extensions.js";
+import type { ConfigurationVariableResolver, SolidityConfig } from "hardhat/types/config";
+import type {
+  UpgradesValidatorConfig,
+  UpgradesValidatorUserConfig,
+} from "../../types/hardhat-type-extensions.js";
 
 // What oz-core's validate() needs from solc beyond Hardhat's defaults (the
 // same outputs @openzeppelin/hardhat-upgrades requests).
@@ -16,7 +19,7 @@ export default async (): Promise<Partial<ConfigHooks>> => {
       // available on context.config inside hook handlers.
       const uvConfig = (
         userConfig as typeof userConfig & {
-          upgradesValidator?: UpgradesValidatorConfig;
+          upgradesValidator?: UpgradesValidatorUserConfig;
         }
       ).upgradesValidator;
 
@@ -25,7 +28,10 @@ export default async (): Promise<Partial<ConfigHooks>> => {
           resolvedConfig as typeof resolvedConfig & {
             upgradesValidator: UpgradesValidatorConfig;
           }
-        ).upgradesValidator = uvConfig;
+        ).upgradesValidator = resolveUpgradesValidatorConfig(
+          uvConfig,
+          resolveConfigurationVariable,
+        );
       }
 
       requestValidationOutputs(resolvedConfig.solidity);
@@ -62,4 +68,33 @@ export function requestValidationOutputs(solidity: SolidityConfig): void {
 
 function union(existing: string[] | undefined, required: string[]): string[] {
   return [...new Set([...(existing ?? []), ...required])];
+}
+
+/**
+ * A `configVariable(...)` API key becomes a resolved variable, read only when
+ * used, so a missing secret never fails an unrelated command. Strings stay
+ * as written: an empty one still means unset.
+ */
+export function resolveUpgradesValidatorConfig(
+  config: UpgradesValidatorUserConfig,
+  resolveConfigurationVariable: ConfigurationVariableResolver,
+): UpgradesValidatorConfig {
+  if (config.explorers === undefined) return config as UpgradesValidatorConfig;
+  const explorers = Object.fromEntries(
+    Object.entries(config.explorers)
+      // A JS config may leave an entry undefined (`x ? {...} : undefined`).
+      .filter(([, explorer]) => explorer !== undefined)
+      .map(([network, { apiKey, ...rest }]) => [
+        network,
+        {
+          ...rest,
+          ...(apiKey === undefined
+            ? {}
+            : {
+                apiKey: typeof apiKey === "string" ? apiKey : resolveConfigurationVariable(apiKey),
+              }),
+        },
+      ]),
+  );
+  return { ...config, explorers };
 }

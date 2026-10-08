@@ -21,4 +21,5 @@ export type {
   UnsafeAllowKind,
   ValidateOptions,
   ProxyKind,
+  BaselineInfo,
 } from "./types/validation.js";

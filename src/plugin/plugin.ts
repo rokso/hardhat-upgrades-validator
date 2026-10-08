@@ -3,7 +3,7 @@ import { task } from "hardhat/config";
 
 const validateUpgradeTask = task(
   "validate-upgrade",
-  "Validate storage layout compatibility for proxy upgrades managed by hardhat-deploy v2",
+  "Validate proxy upgrades against the implementation each proxy runs on chain",
 )
   .addOption({
     name: "contract",
@@ -12,7 +12,7 @@ const validateUpgradeTask = task(
   })
   .addFlag({
     name: "all",
-    description: "Validate all deployed contracts that have a stored storage layout",
+    description: "Validate every proxy found on the chain (offline: in the proxy index)",
   })
   .addOption({
     name: "unsafeAllow",
@@ -41,7 +41,7 @@ const validateUpgradeTask = task(
 
 const recordBaselineTask = task(
   "record-baseline",
-  "Stamp the current compiled storageLayout into deployment files as the upgrade baseline",
+  "Record the storage layout of the implementation each proxy runs, keyed by implementation address",
 )
   .addOption({
     name: "contract",
@@ -50,11 +50,16 @@ const recordBaselineTask = task(
   })
   .addFlag({
     name: "all",
-    description: "Record baselines for all deployed contracts",
+    description: "Record the implementation of every proxy found on the chain",
   })
   .addFlag({
     name: "force",
-    description: "Overwrite existing baselines",
+    description: "Overwrite existing records (never skips the bytecode proof)",
+  })
+  .addFlag({
+    name: "fromChain",
+    description:
+      "Rebuild the layout from the implementation's verified source instead of the local build",
   })
   .setAction(() => import("./tasks/record-baseline.js"))
   .build();

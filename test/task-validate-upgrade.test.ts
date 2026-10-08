@@ -17,7 +17,6 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
   return {
     ...orig,
-    listDeployedContractsWithLayout: vi.fn(),
     getContractBuildData: vi.fn(),
     createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
     resolveArtifactName: vi.fn().mockImplementation((_: unknown, name: string) => name),
@@ -25,9 +24,12 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/core/proxy-detection.js", () => ({
-  detectProxy: vi.fn().mockReturnValue({ isProxy: true }),
-  detectProxyOnchain: vi.fn().mockResolvedValue({ isProxy: true }),
+vi.mock("../src/plugin/internals/proxy-discovery.js", () => ({
+  listProxyDeployments: vi.fn(),
+  artifactCodeLookup: vi.fn(),
+  discoverProxies: vi.fn(),
+  indexedRole: vi.fn().mockResolvedValue("unknown"),
+  updateProxyIndex: vi.fn(),
 }));
 
 vi.mock("../src/core/validator.js", async (importOriginal) => {
@@ -45,13 +47,16 @@ vi.mock("../src/core/validator.js", async (importOriginal) => {
 
 import validateUpgradeAction from "../src/plugin/tasks/validate-upgrade.js";
 import {
-  listDeployedContractsWithLayout,
   getContractBuildData,
   readDeployment,
   ArtifactNotFoundError,
 } from "../src/plugin/internals/deployment-utils.js";
 import { validateStorageUpgrade } from "../src/core/validator.js";
-import { detectProxy, detectProxyOnchain } from "../src/core/proxy-detection.js";
+import {
+  listProxyDeployments,
+  discoverProxies,
+  indexedRole,
+} from "../src/plugin/internals/proxy-discovery.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,7 +93,7 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vutest-"));
   vi.clearAllMocks();
   // Default stubs; individual tests override as needed.
-  vi.mocked(listDeployedContractsWithLayout).mockResolvedValue([]);
+  vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [], unindexed: [] });
   vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   vi.mocked(readDeployment).mockResolvedValue(null);
 });
@@ -138,7 +143,7 @@ describe("argument validation", () => {
 
   it("returns early (no error) when --all is true but no deployments exist", async () => {
     const hre = makeHre(tmpDir);
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue([]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [], unindexed: [] });
     await expect(
       validateUpgradeAction(
         {
@@ -161,7 +166,11 @@ describe("argument validation", () => {
 
 describe("unsafeAllow token parsing", () => {
   beforeEach(() => {
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue(["MyContract"]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({
+      names: ["MyContract"],
+      errors: [],
+      unindexed: [],
+    });
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   });
@@ -271,32 +280,28 @@ describe("contracts that cannot be checked fail", () => {
     expect(out).toMatch(/\[ERROR\].*artifact MyContract not found/);
   });
 
-  it("validates a baselined deployment without asking whether it is a proxy", async () => {
+  it("offline: validates a deployment the index does not know against its deprecated field", async () => {
     vi.mocked(readDeployment).mockResolvedValue(baselined as never);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
     await runTask();
-    expect(detectProxy).not.toHaveBeenCalled();
-    expect(detectProxyOnchain).not.toHaveBeenCalled();
+    expect(indexedRole).toHaveBeenCalled();
     expect(validateStorageUpgrade).toHaveBeenCalledTimes(1);
   });
 
-  it("an existing deployment without a baseline when proxy status is unknown", async () => {
-    // No reachable network (makeHre's network.create rejects), not a proxy offline.
+  it("offline: an existing deployment with no baseline at all", async () => {
+    // No reachable network (makeHre's network.create rejects) and no index entry.
     vi.mocked(readDeployment).mockResolvedValue({ address: "0x1" } as never);
-    vi.mocked(detectProxy).mockReturnValueOnce({ isProxy: false });
     const { exitCode, out } = await runTask();
-    expect(detectProxyOnchain).not.toHaveBeenCalled();
     expect(exitCode).toBe(1);
-    expect(out).toMatch(/no upgradeStorageLayout.*could not be confirmed not to be a proxy/);
+    expect(out).toMatch(/\[ERROR\].*no baseline/);
   });
 
-  it("skips an existing deployment without a baseline that the chain shows is not a proxy", async () => {
+  it("online: skips a deployment the chain shows is not a proxy", async () => {
     vi.mocked(readDeployment).mockResolvedValue({ address: "0x1" } as never);
-    vi.mocked(detectProxy).mockReturnValueOnce({ isProxy: false });
-    vi.mocked(detectProxyOnchain).mockResolvedValueOnce({ isProxy: false });
+    vi.mocked(discoverProxies).mockResolvedValueOnce({ proxies: [], unvalidated: [], errors: [] });
     const hre = makeHre(tmpDir);
     (hre.network.create as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      provider: {},
+      provider: { send: vi.fn().mockResolvedValue("0x1") },
       close: vi.fn().mockResolvedValue(undefined),
     });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -313,7 +318,11 @@ describe("contracts that cannot be checked fail", () => {
 
 describe("safety errors", () => {
   it("fails (exit code 1) for a contract missing from the validation cache", async () => {
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue(["MyContract"]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({
+      names: ["MyContract"],
+      errors: [],
+      unindexed: [],
+    });
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue({
       ...defaultBuildData(),
@@ -341,7 +350,11 @@ describe("safety errors", () => {
   });
 
   it("sets process.exitCode = 1 for an OZ safety error even when storage passes", async () => {
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue(["MyContract"]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({
+      names: ["MyContract"],
+      errors: [],
+      unindexed: [],
+    });
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue({
       ...defaultBuildData(),
@@ -372,7 +385,11 @@ describe("safety errors", () => {
 
 describe("proxyKind override parsing", () => {
   beforeEach(() => {
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue(["MyContract"]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({
+      names: ["MyContract"],
+      errors: [],
+      unindexed: [],
+    });
     vi.mocked(readDeployment).mockResolvedValue(null);
     vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
   });
@@ -462,14 +479,14 @@ describe("proxyKind override parsing", () => {
       hre as never,
     );
 
-    const calledWithDir = vi.mocked(listDeployedContractsWithLayout).mock.calls[0]?.[0];
+    const calledWithDir = vi.mocked(listProxyDeployments).mock.calls[0]?.[0];
     expect(calledWithDir).toContain(join("deployments", "mainnet"));
   });
 
   it("scans every network directory when --network is not passed", async () => {
     await mkdir(join(tmpDir, "deployments", "a"), { recursive: true });
     await mkdir(join(tmpDir, "deployments", "b"), { recursive: true });
-    vi.mocked(listDeployedContractsWithLayout).mockResolvedValue([]);
+    vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [], unindexed: [] });
     await validateUpgradeAction(
       {
         contract: undefined,
@@ -481,7 +498,7 @@ describe("proxyKind override parsing", () => {
       },
       makeHre(tmpDir, undefined) as never, // as Hardhat does without --network
     );
-    const dirs = vi.mocked(listDeployedContractsWithLayout).mock.calls.map((c) => c[0]);
+    const dirs = vi.mocked(listProxyDeployments).mock.calls.map((c) => c[0]);
     expect(dirs).toEqual([join(tmpDir, "deployments", "a"), join(tmpDir, "deployments", "b")]);
   });
 });

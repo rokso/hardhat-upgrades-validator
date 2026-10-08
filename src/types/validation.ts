@@ -30,11 +30,39 @@ export interface ValidationResult {
   storage?: StorageReport;
   safetyErrors: SafetyError[];
   warnings: ValidationWarning[];
+  /** Where the old layout came from; set by the tasks, hooks and proxy helpers. */
+  baseline?: BaselineInfo;
 }
+
+/**
+ * The "before" layout of a validation:
+ * - `chain`: the layout of the implementation the proxy runs now, read from the chain.
+ * - `offline-record`: the record for the implementation the proxy index names
+ *   (the proxy as last observed online); not checked against the chain.
+ * - `deployment-file`: the deprecated `upgradeStorageLayout` field.
+ * - `none`: no baseline (a first deployment).
+ */
+export type BaselineInfo =
+  | {
+      source: "chain";
+      implementation: string;
+      bytecodeMatch: string;
+      origin: "store" | "explorer";
+    }
+  | {
+      source: "offline-record";
+      implementation: string;
+      bytecodeMatch: string;
+      observedAtBlock: number;
+    }
+  | { source: "deployment-file" }
+  | { source: "none" };
 
 export type ValidationWarning =
   | { kind: "no-baseline"; contractName: string }
-  | { kind: "storage-check-skipped"; contractName: string };
+  | { kind: "storage-check-skipped"; contractName: string }
+  | { kind: "deprecated-baseline"; contractName: string }
+  | { kind: "chain-baseline-unavailable"; contractName: string; reason: string };
 
 // ---------------------------------------------------------------------------
 // Validation options

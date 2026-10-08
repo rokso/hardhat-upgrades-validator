@@ -40,8 +40,9 @@ vi.mock("../src/core/validator.js", async (importOriginal) => {
 });
 
 import compileHookFactory from "../src/plugin/hooks/compile.js";
+import { updateProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
 import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
-import { validateStorageUpgrade } from "../src/core/validator.js";
+import { validateStorageUpgrade, formatValidationResult } from "../src/core/validator.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -327,5 +328,122 @@ describe("skipped contracts", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Proxy index (offline baselines)
+// ---------------------------------------------------------------------------
+
+describe("auto-validation from the proxy index", () => {
+  const PROXY = "0x00000000000000000000000000000000000000aa";
+  const IMPL = "0x00000000000000000000000000000000000000bb";
+  const OTHER = "0x00000000000000000000000000000000000000cc";
+  const storeDir = () => join(deploymentsBase, "mainnet", ".storage-layouts");
+
+  async function index(proxy: string, implementation: string, name: string) {
+    await updateProxyEntry(storeDir(), {
+      format: 1,
+      proxy,
+      chainId: 1,
+      implementation,
+      deployments: [name],
+      observedAtBlock: 42,
+    });
+  }
+
+  async function record(address: string, bytecodeMatch: string) {
+    await writeLayoutRecord(storeDir(), {
+      format: 1,
+      address,
+      chainId: 1,
+      codeSha256: "00".repeat(32),
+      contract: "a.sol:Recorded",
+      bytecodeMatch: bytecodeMatch as never,
+      source: "local-compile",
+      recordedAt: "2026-01-01T00:00:00.000Z",
+      layout: testLayout as never,
+    });
+  }
+
+  async function build() {
+    const logs: string[] = [];
+    const spy = vi
+      .spyOn(console, "log")
+      .mockImplementation((m: string) => void logs.push(String(m)));
+    const err = vi.spyOn(console, "error").mockImplementation((m: string) => void logs.push(m));
+    try {
+      const hooks = await compileHookFactory();
+      await hooks.build(makeContext() as never, [], undefined, makeNext());
+    } finally {
+      spy.mockRestore();
+      err.mockRestore();
+    }
+    return logs.join("\n");
+  }
+
+  it("validates indexed proxies, and names a skip instead of claiming all passed", async () => {
+    await writeDeployment("mainnet", "Recorded", { address: PROXY });
+    await writeDeployment("mainnet", "Unrecorded", { address: OTHER });
+    await index(PROXY, IMPL, "Recorded");
+    await index(OTHER, OTHER, "Unrecorded");
+    await record(IMPL, "exact");
+
+    const out = await build();
+
+    expect(vi.mocked(getContractBuildData).mock.calls.map((c) => c[0])).toEqual(["Recorded"]);
+    expect(out).toMatch(
+      /\[SKIP\] "mainnet\/Unrecorded": No baseline for "Unrecorded": no layout record for 0x0+cc, the implementation as of block 42/,
+    );
+    expect(out).toMatch(/Storage layout checks passed; 1 skipped/);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("fails when the proxy index cannot be read", async () => {
+    const { mkdir: mk } = await import("node:fs/promises");
+    await writeDeployment("mainnet", "Recorded", { address: PROXY });
+    await mk(join(storeDir(), "proxies"), { recursive: true });
+    await writeFile(join(storeDir(), "proxies", `${PROXY}.json`), "<<<<<<< HEAD\n");
+
+    const out = await build();
+
+    expect(out).toMatch(/Could not read the proxy index for "mainnet"/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("fails an index entry whose file was renamed", async () => {
+    await writeDeployment("mainnet", "Renamed", { address: PROXY });
+    await index(PROXY, IMPL, "Recorded");
+    await record(IMPL, "exact");
+
+    const out = await build();
+
+    expect(out).toMatch(/no such file is at its address/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("prints a result validated against the deprecated field (its warning is the signal)", async () => {
+    await writeDeployment("mainnet", "Legacy", {
+      address: OTHER,
+      upgradeStorageLayout: testLayout,
+    });
+
+    const out = await build();
+
+    expect(vi.mocked(getContractBuildData).mock.calls.map((c) => c[0])).toEqual(["Legacy"]);
+    expect(vi.mocked(formatValidationResult)).toHaveBeenCalledTimes(1);
+    expect(out).toContain("OK");
+  });
+
+  it("fails (never skips) a record that cannot be trusted", async () => {
+    await writeDeployment("mainnet", "Recorded", { address: PROXY });
+    await index(PROXY, IMPL, "Recorded");
+    await record(IMPL, "metadata-only"); // does not prove a layout
+
+    const out = await build();
+
+    expect(out).toMatch(/does not prove a storage layout/);
+    expect(out).not.toMatch(/\[SKIP\]/);
+    expect(process.exitCode).toBe(1);
   });
 });

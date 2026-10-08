@@ -183,15 +183,10 @@ export async function getContractBuildData(
   return { upgradeStorageLayout, safetyErrors, proxyKind };
 }
 
-export {
-  readDeployment,
-  listDeployedContractsWithLayout,
-  resolveArtifactName,
-} from "./deployment-files.js";
+export { readDeployment, readDeployments, resolveArtifactName } from "./deployment-files.js";
 export type { DeploymentFile } from "./deployment-files.js";
 
-export { stripBytecodeMetadata, compareBytecode } from "../../core/bytecode-utils.js";
-export type { BytecodeMatchResult } from "../../core/bytecode-utils.js";
+export { stripBytecodeMetadata } from "../../core/bytecode-utils.js";
 
 import { listSubdirsOrEmpty } from "../../utils/io.js";
 

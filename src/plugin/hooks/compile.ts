@@ -1,10 +1,10 @@
 /**
  * Hardhat v3 `solidity.build` hook handler.
  *
- * After a successful compilation pass, scans every network directory under
- * `deployments/` for contracts that have a saved `upgradeStorageLayout`
- * baseline, and validates each against the freshly compiled layout. Any
- * errors cause `process.exitCode = 1`.
+ * After a successful compilation pass, validates every proxy deployment the
+ * proxy index (or a deprecated `upgradeStorageLayout` field) knows about, in
+ * every network directory under `deployments/`, against the freshly compiled
+ * layout. Offline only. Any errors cause `process.exitCode = 1`.
  *
  * Also handles `getCompilationJobErrors`, which sees each compilation job's
  * solc input and full output, to run oz-core's `validate()` on it. Before
@@ -52,11 +52,13 @@ import {
 } from "../../core/validator.js";
 import {
   readDeployment,
-  listDeployedContractsWithLayout,
   getContractBuildData,
   createBuildInfoOutputCache,
   resolveArtifactName,
 } from "../internals/deployment-utils.js";
+import { resolveBaseline } from "../internals/baseline.js";
+import { LayoutUnavailableError } from "../../core/onchain/errors.js";
+import { listProxyDeployments } from "../internals/proxy-discovery.js";
 import { listSubdirsOrEmpty } from "../../utils/io.js";
 import { logger } from "../../utils/logger.js";
 
@@ -336,7 +338,19 @@ async function runAutoValidation(
 
   for (const network of networkDirs) {
     const deploymentsDir = resolve(deploymentsBase, network);
-    const contractNames = await listDeployedContractsWithLayout(deploymentsDir);
+    let contractNames: string[];
+    try {
+      const listed = await listProxyDeployments(deploymentsDir);
+      contractNames = listed.names;
+      for (const e of listed.errors) {
+        logger.error(`"${network}" ${e.address} (${e.deployments.join(", ")}): ${e.reason}`);
+        anyErrors = true;
+      }
+    } catch (err) {
+      logger.error(`Could not read the proxy index for "${network}": ${(err as Error).message}`);
+      anyErrors = true;
+      continue;
+    }
 
     for (const name of contractNames) {
       const deployment = await readDeployment(deploymentsDir, name);
@@ -347,8 +361,35 @@ async function runAutoValidation(
         continue;
       }
 
-      // listDeployedContractsWithLayout guarantees upgradeStorageLayout is present.
-      const oldLayout = deployment.upgradeStorageLayout!;
+      // Compiling must not need an RPC or explorer, so this is always offline:
+      // the record for the implementation the proxy index names, else the
+      // deprecated field. validate-upgrade and assertProxyUpgrade read the chain.
+      let baseline;
+      try {
+        baseline = await resolveBaseline({
+          name,
+          deployment,
+          deploymentsDir,
+          networkName: network,
+          config: context.config.upgradesValidator,
+        });
+      } catch (err) {
+        // Compiling stays usable offline: a known proxy with no record is
+        // reported here, and fails validate-upgrade and assertProxyUpgrade.
+        if (err instanceof LayoutUnavailableError) {
+          logger.log(`  [SKIP] "${network}/${name}": ${err.message}`);
+          skipped++;
+          continue;
+        }
+        logger.error(`Could not read the baseline for "${name}": ${(err as Error).message}`);
+        anyErrors = true;
+        continue;
+      }
+      if (baseline.layout === undefined) {
+        logger.log(`  [SKIP] "${network}/${name}": no baseline.`);
+        skipped++;
+        continue;
+      }
 
       const artifactName = resolveArtifactName(deployment, name);
 
@@ -377,16 +418,16 @@ async function runAutoValidation(
       }
 
       const validation = withSafetyErrors(
-        validateStorageUpgrade(name, oldLayout, upgradeStorageLayout, { kind: proxyKind }),
+        validateStorageUpgrade(name, baseline.layout, upgradeStorageLayout, { kind: proxyKind }),
         safetyErrors,
       );
-
-      const message = formatValidationResult(name, validation);
+      validation.baseline = baseline.info;
+      validation.warnings.push(...baseline.warnings);
 
       anyValidated = true;
 
       if (!validation.ok || validation.warnings.length > 0) {
-        logger.log(message);
+        logger.log(formatValidationResult(`${network}/${name}`, validation));
       }
 
       if (!validation.ok) {
