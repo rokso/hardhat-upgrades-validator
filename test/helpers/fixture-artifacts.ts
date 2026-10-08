@@ -72,7 +72,7 @@ export function makeFixtureArtifacts(
 
     async getBuildInfoOutputPath(buildInfoId) {
       const outputPath = join(fixturesDir, "artifacts", "build-info", `${buildInfoId}.output.json`);
-      // Return the path unconditionally — tests commit the output files.
+      // Return the path unconditionally; tests commit the output files.
       return outputPath;
     },
   };

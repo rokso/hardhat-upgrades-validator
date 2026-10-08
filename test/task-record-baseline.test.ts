@@ -13,7 +13,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 // ---------------------------------------------------------------------------
-// Module mocks (partial — keeps compareBytecode and readDeployment real)
+// Module mocks (partial; keeps compareBytecode and readDeployment real)
 // ---------------------------------------------------------------------------
 
 vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
@@ -26,12 +26,11 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   };
 });
 
-vi.mock("../src/plugin/validations-cache.js", () => ({
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
-}));
-
 import recordBaselineAction from "../src/plugin/tasks/record-baseline.js";
-import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import {
+  getContractBuildData,
+  ArtifactNotFoundError,
+} from "../src/plugin/internals/deployment-utils.js";
 
 // ---------------------------------------------------------------------------
 // Bytecode helpers (same structure as deployment-utils.test.ts)
@@ -79,9 +78,9 @@ async function readDeploymentFile(name: string): Promise<Record<string, unknown>
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
-function makeHre(artifactBytecode: string) {
+function makeHre(artifactBytecode: string, network: string | undefined = "localhost") {
   return {
-    globalOptions: { network: "localhost" },
+    globalOptions: { network },
     config: { paths: { root: tmpDir, cache: join(tmpDir, "cache") } },
     artifacts: {
       readArtifact: vi.fn().mockResolvedValue({ deployedBytecode: artifactBytecode }),
@@ -252,13 +251,15 @@ describe("metadata-only bytecode match", () => {
 // ---------------------------------------------------------------------------
 
 describe("artifact not found", () => {
-  it("skips when getContractBuildData throws", async () => {
+  it("skips when the artifact does not exist", async () => {
     await writeDeployment("MyContract", {
       address: "0x1",
       deployedBytecode: makeBytecode("60806040", 10),
     });
     const hre = makeHre(makeBytecode("60806040", 10));
-    vi.mocked(getContractBuildData).mockRejectedValue(new Error("artifact not found"));
+    vi.mocked(getContractBuildData).mockRejectedValue(
+      new ArtifactNotFoundError("MyContract", new Error("HHE1000")),
+    );
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await recordBaselineAction({ contract: "MyContract", all: false, force: false }, hre as never);
@@ -269,8 +270,57 @@ describe("artifact not found", () => {
   });
 });
 
+describe("other build-data errors", () => {
+  it("fail (exit code 1) instead of being reported as a missing artifact", async () => {
+    await writeDeployment("MyContract", {
+      address: "0x1",
+      deployedBytecode: makeBytecode("60806040", 10),
+    });
+    vi.mocked(getContractBuildData).mockRejectedValue(new Error("getErrors exploded"));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await recordBaselineAction(
+        { contract: "MyContract", all: false, force: false },
+        makeHre(makeBytecode("60806040", 10)) as never,
+      );
+      expect(process.exitCode).toBe(1);
+      expect(logSpy.mock.calls.flat().join("\n")).toMatch(/\[ERROR\].*getErrors exploded/);
+    } finally {
+      process.exitCode = undefined;
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe("contract missing from the validation cache", () => {
+  it("fails (exit code 1) instead of skipping", async () => {
+    await writeDeployment("MyContract", {
+      address: "0x1",
+      deployedBytecode: makeBytecode("60806040", 10),
+    });
+    vi.mocked(getContractBuildData).mockResolvedValue({
+      upgradeStorageLayout: undefined,
+      safetyErrors: [],
+      proxyKind: undefined,
+    } as never);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await recordBaselineAction(
+        { contract: "MyContract", all: false, force: false },
+        makeHre(makeBytecode("60806040", 10)) as never,
+      );
+      expect(process.exitCode).toBe(1);
+      expect(logSpy.mock.calls.flat().join("\n")).toMatch(/\[ERROR\].*validation cache/);
+    } finally {
+      process.exitCode = undefined;
+      logSpy.mockRestore();
+    }
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toBeUndefined();
+  });
+});
+
 describe("network override", () => {
-  it("uses args.network when provided", async () => {
+  it("uses the global --network option", async () => {
     const mainnetDir = join(tmpDir, "deployments", "mainnet");
     await mkdir(mainnetDir, { recursive: true });
     await writeFile(
@@ -279,7 +329,11 @@ describe("network override", () => {
       "utf8",
     );
 
-    const hre = makeHre(makeBytecode("60806040", 10));
+    await writeDeployment("MyContract", {
+      address: "0x1",
+      deployedBytecode: makeBytecode("60806040", 10),
+    });
+    const hre = makeHre(makeBytecode("60806040", 10), "mainnet");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     await recordBaselineAction(
@@ -287,7 +341,6 @@ describe("network override", () => {
         contract: "MyContract",
         all: false,
         force: true,
-        network: "mainnet",
       },
       hre as never,
     );
@@ -298,7 +351,7 @@ describe("network override", () => {
     const mainnetResult = JSON.parse(mainnetRaw) as Record<string, unknown>;
     expect(mainnetResult.upgradeStorageLayout).toEqual(testLayout);
 
-    const localhostResult = await readDeploymentFile("MyContract").catch(() => null);
-    expect(localhostResult).toBeNull();
+    // The same contract on localhost is left alone.
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toBeUndefined();
   });
 });

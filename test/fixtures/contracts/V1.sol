@@ -10,10 +10,13 @@ contract V1 {
         bool active;
     }
 
+    struct Position {
+        uint256 x;
+        uint256 y;
+    }
+
     uint256 public version;
     uint256 public legacyData;
     uint256 public rawConfig;
-    uint256 public unsafeRenameSource;
-    uint256 public unsafeRenameSource2;
-    uint256 public unsafeTypeSource;
+    Position public position;
 }

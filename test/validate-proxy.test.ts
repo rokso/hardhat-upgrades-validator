@@ -97,9 +97,6 @@ function makeHre(network = "localhost") {
 function mockBuildData(newLayout: StorageLayout | undefined) {
   vi.mocked(getContractBuildData).mockResolvedValue({
     upgradeStorageLayout: newLayout,
-    unsafeAllowFromAnnotation: [],
-    perVariableUnsafeAllow: new Map(),
-    namespaceUnsafeAllow: new Map(),
     safetyErrors: [],
     proxyKind: undefined,
   } as never);
@@ -117,11 +114,19 @@ describe("validateProxyUpgrade", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("returns ok when existing deployment has no upgradeStorageLayout", async () => {
+  it("throws when the deployment exists but has no baseline (not a first deployment)", async () => {
     vi.mocked(readDeployment).mockResolvedValue({ address: "0xold" } as never);
     mockBuildData(layoutWithNewVar);
-    const result = await validateProxyUpgrade(makeHre() as never, "MyContract");
-    expect(result.ok).toBe(true);
+    await expect(validateProxyUpgrade(makeHre() as never, "MyContract")).rejects.toThrow(
+      /deployed but has no upgradeStorageLayout baseline/,
+    );
+  });
+
+  it("passes kind to OZ's getErrors via getContractBuildData", async () => {
+    vi.mocked(readDeployment).mockResolvedValue(null);
+    mockBuildData(layout);
+    await validateProxyUpgrade(makeHre() as never, "MyContract", { kind: "uups" });
+    expect(vi.mocked(getContractBuildData).mock.lastCall![4]).toMatchObject({ kind: "uups" });
   });
 
   it("returns ok for a backward-compatible upgrade (append only)", async () => {
@@ -132,7 +137,7 @@ describe("validateProxyUpgrade", () => {
     mockBuildData(layoutWithNewVar);
     const result = await validateProxyUpgrade(makeHre() as never, "MyContract");
     expect(result.ok).toBe(true);
-    expect(result.errors).toHaveLength(0);
+    expect(result.storage?.ok).toBe(true);
   });
 
   it("returns errors when a variable is removed", async () => {
@@ -143,7 +148,7 @@ describe("validateProxyUpgrade", () => {
     mockBuildData(layoutWithRemovedVar);
     const result = await validateProxyUpgrade(makeHre() as never, "MyContract");
     expect(result.ok).toBe(false);
-    expect(result.errors[0].kind).toBe("variable-removed");
+    expect(result.storage?.ops.map((op) => op.kind)).toEqual(["delete"]);
   });
 
   it("respects unsafeSkipStorageCheck", async () => {
@@ -159,19 +164,43 @@ describe("validateProxyUpgrade", () => {
     expect(result.warnings.some((w) => w.kind === "storage-check-skipped")).toBe(true);
   });
 
-  it("respects unsafeAllow for type-changed", async () => {
+  it("fails a type change (no blanket bypass exists)", async () => {
     vi.mocked(readDeployment).mockResolvedValue({
       address: "0xold",
       upgradeStorageLayout: layout,
     } as never);
     mockBuildData(layoutWithTypeChangedVar);
-    const result = await validateProxyUpgrade(makeHre() as never, "MyContract", {
-      unsafeAllow: ["type-changed"],
-    });
-    expect(result.ok).toBe(true);
+    const result = await validateProxyUpgrade(makeHre() as never, "MyContract");
+    expect(result.ok).toBe(false);
   });
 
-  it("merges unsafeAllow from options and annotations", async () => {
+  it("passes unsafeAllow to OZ's getErrors via getContractBuildData", async () => {
+    vi.mocked(readDeployment).mockResolvedValue(null);
+    mockBuildData(layout);
+    await validateProxyUpgrade(makeHre() as never, "MyContract", {
+      unsafeAllow: ["constructor"],
+    });
+    expect(vi.mocked(getContractBuildData).mock.lastCall![4]).toEqual({
+      unsafeAllow: ["constructor"],
+    });
+  });
+
+  it("fails on a safety error from OZ even when storage is compatible", async () => {
+    vi.mocked(readDeployment).mockResolvedValue({
+      address: "0xold",
+      upgradeStorageLayout: layout,
+    } as never);
+    vi.mocked(getContractBuildData).mockResolvedValue({
+      upgradeStorageLayout: layoutWithNewVar,
+      safetyErrors: [{ kind: "missing-public-upgradeto", src: "contracts/A.sol:1" }],
+      proxyKind: "uups",
+    } as never);
+    const result = await validateProxyUpgrade(makeHre() as never, "MyContract");
+    expect(result.ok).toBe(false);
+    expect(result.safetyErrors.map((e) => e.kind)).toEqual(["missing-public-upgradeto"]);
+  });
+
+  it("passes a rename with unsafeAllowRenames", async () => {
     const layoutRenamed: StorageLayout = {
       storage: [
         {
@@ -189,16 +218,10 @@ describe("validateProxyUpgrade", () => {
       address: "0xold",
       upgradeStorageLayout: layout,
     } as never);
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      upgradeStorageLayout: layoutRenamed,
-      unsafeAllowFromAnnotation: ["type-changed"],
-      perVariableUnsafeAllow: new Map(),
-      namespaceUnsafeAllow: new Map(),
-      safetyErrors: [],
-      proxyKind: undefined,
-    } as never);
+    mockBuildData(layoutRenamed);
+    expect((await validateProxyUpgrade(makeHre() as never, "MyContract")).ok).toBe(false);
     const result = await validateProxyUpgrade(makeHre() as never, "MyContract", {
-      unsafeAllow: ["variable-renamed"],
+      unsafeAllowRenames: true,
     });
     expect(result.ok).toBe(true);
   });
@@ -260,7 +283,7 @@ describe("assertProxyUpgrade", () => {
     ).resolves.not.toThrow();
   });
 
-  it("does not throw when variable-renamed is covered by unsafeAllow", async () => {
+  it("does not throw when a rename is covered by unsafeAllowRenames", async () => {
     const layoutRenamed: StorageLayout = {
       storage: [
         {
@@ -281,7 +304,7 @@ describe("assertProxyUpgrade", () => {
     mockBuildData(layoutRenamed);
     await expect(
       assertProxyUpgrade(makeHre() as never, "MyContract", {
-        unsafeAllow: ["variable-renamed"],
+        unsafeAllowRenames: true,
       }),
     ).resolves.not.toThrow();
   });

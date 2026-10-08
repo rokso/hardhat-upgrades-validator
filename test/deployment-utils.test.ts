@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import {
   stripBytecodeMetadata,
   compareBytecode,
-  parseUnsafeAllowAnnotation,
   readDeployment,
   resolveWinnerSource,
 } from "../src/plugin/internals/deployment-utils.js";
@@ -25,77 +24,6 @@ function makeBytecode(coreHex: string, cborLength: number): string {
   lenBuf.writeUInt16BE(cborLength, 0);
   return "0x" + Buffer.concat([core, cbor, lenBuf]).toString("hex");
 }
-
-// ---------------------------------------------------------------------------
-// parseUnsafeAllowAnnotation
-// ---------------------------------------------------------------------------
-
-describe("parseUnsafeAllowAnnotation", () => {
-  it("returns [] for undefined", () => {
-    expect(parseUnsafeAllowAnnotation(undefined)).toEqual([]);
-  });
-
-  it("returns [] for null", () => {
-    expect(parseUnsafeAllowAnnotation(null)).toEqual([]);
-  });
-
-  it("returns [] for empty string", () => {
-    expect(parseUnsafeAllowAnnotation("")).toEqual([]);
-  });
-
-  it("parses a single known kind", () => {
-    expect(parseUnsafeAllowAnnotation("variable-renamed")).toEqual(["variable-renamed"]);
-  });
-
-  it("parses multiple space-separated kinds", () => {
-    expect(parseUnsafeAllowAnnotation("variable-renamed type-changed")).toEqual([
-      "variable-renamed",
-      "type-changed",
-    ]);
-  });
-
-  it("parses comma-separated kinds", () => {
-    expect(parseUnsafeAllowAnnotation("variable-renamed,type-changed")).toEqual([
-      "variable-renamed",
-      "type-changed",
-    ]);
-  });
-
-  it("filters out unknown kinds silently when no context is given", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(parseUnsafeAllowAnnotation("variable-renamed not-a-kind type-changed")).toEqual([
-      "variable-renamed",
-      "type-changed",
-    ]);
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it("returns [] when all kinds are unknown (no context)", () => {
-    expect(parseUnsafeAllowAnnotation("foo bar baz")).toEqual([]);
-  });
-
-  it("emits console.warn listing unknown tokens when context is provided", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    parseUnsafeAllowAnnotation(
-      "variable-renamed typo-kind type-changed",
-      `contract MyContract, variable "myVar"`,
-    );
-    expect(warn).toHaveBeenCalledOnce();
-    const msg = warn.mock.calls[0]![0] as string;
-    expect(msg).toContain("typo-kind");
-    expect(msg).toContain(`contract MyContract, variable "myVar"`);
-    expect(msg).toContain("variable-renamed");
-    warn.mockRestore();
-  });
-
-  it("does not warn when all tokens are valid even with context", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    parseUnsafeAllowAnnotation("variable-renamed type-changed", "contract MyContract");
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // readDeployment
@@ -155,7 +83,7 @@ describe("stripBytecodeMetadata", () => {
   it("returns original when too short to contain metadata", () => {
     const short = "0x1234";
     // The length field would claim 0x1234 = 4660 bytes of metadata, but the
-    // bytecode itself is only 2 bytes total — sanity check should kick in.
+    // bytecode itself is only 2 bytes total; sanity check should kick in.
     const result = stripBytecodeMetadata(short);
     expect(result).toBe(short);
   });

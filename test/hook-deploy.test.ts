@@ -12,7 +12,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
 // ---------------------------------------------------------------------------
-// Module mocks (partial — keeps compareBytecode and readDeployment real)
+// Module mocks (partial; keeps compareBytecode and readDeployment real)
 // ---------------------------------------------------------------------------
 
 vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
@@ -27,10 +27,6 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
 
 vi.mock("../src/plugin/hooks/compile.js", () => ({
   getInMemoryValidations: vi.fn().mockReturnValue(null),
-}));
-
-vi.mock("../src/plugin/validations-cache.js", () => ({
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
 }));
 
 import deployOverride from "../src/plugin/hooks/deploy.js";
@@ -247,5 +243,106 @@ describe("upgradeStorageLayout stamping", () => {
 
     const result = await readDeploymentFile("MyContract");
     expect(result.upgradeStorageLayout).toEqual(testLayout);
+  });
+});
+
+describe("runs that must not stamp", () => {
+  it("does not crash and stamps nothing without --network (Hardhat leaves it undefined)", async () => {
+    const bytecode = makeBytecode("60806040", 10);
+    await writeDeployment("MyContract", { address: "0x1", deployedBytecode: bytecode });
+    const hre = { ...makeHre(bytecode), globalOptions: { network: undefined } };
+    const runSuper = vi.fn().mockResolvedValue("deployed");
+
+    await expect(deployOverride({}, hre as never, runSuper)).resolves.toBe("deployed");
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toBeUndefined();
+  });
+
+  it("stamps nothing under hardhat-deploy's fork mode (HARDHAT_FORK)", async () => {
+    const bytecode = makeBytecode("60806040", 10);
+    await writeDeployment("MyContract", { address: "0x1", deployedBytecode: bytecode });
+    vi.stubEnv("HARDHAT_FORK", "mainnet");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await deployOverride({}, makeHre(bytecode) as never, vi.fn().mockResolvedValue(undefined));
+    } finally {
+      vi.unstubAllEnvs();
+      log.mockRestore();
+    }
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toBeUndefined();
+  });
+});
+
+// hardhat-deploy rewrites a proxy's file on upgrade from the proxy record and
+// the new artifact, dropping upgradeStorageLayout. runSuper simulates that.
+describe("in-place upgrades are checked against the pre-deploy baseline", () => {
+  const otherLayout = {
+    storage: [
+      {
+        label: "renamed",
+        slot: "0",
+        offset: 0,
+        type: "t_uint256",
+        contract: "MyContract",
+        src: "",
+      },
+    ],
+    types: { t_uint256: { label: "uint256", numberOfBytes: "32" } },
+  };
+  const appendedLayout = {
+    storage: [
+      ...testLayout.storage,
+      { label: "extra", slot: "1", offset: 0, type: "t_uint256", contract: "MyContract", src: "" },
+    ],
+    types: testLayout.types,
+  };
+
+  function upgradeTo(address: string, bytecode: string) {
+    return vi.fn().mockImplementation(async () => {
+      await writeDeployment("MyContract", { address, deployedBytecode: bytecode });
+    });
+  }
+
+  async function run(newLayout: unknown, newAddress: string) {
+    const bytecode = makeBytecode("60806041", 10);
+    await writeDeployment("MyContract", {
+      address: "0xProxy",
+      deployedBytecode: makeBytecode("60806040", 10),
+      upgradeStorageLayout: testLayout,
+    });
+    vi.mocked(getContractBuildData).mockResolvedValue({
+      upgradeStorageLayout: newLayout,
+      safetyErrors: [],
+      proxyKind: undefined,
+    } as never);
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await deployOverride({}, makeHre(bytecode) as never, upgradeTo(newAddress, bytecode));
+      return err.mock.calls.flat().join("\n");
+    } finally {
+      err.mockRestore();
+    }
+  }
+
+  afterEach(() => {
+    process.exitCode = undefined;
+  });
+
+  it("keeps the old baseline and exits 1 when the upgrade is incompatible", async () => {
+    const errors = await run(otherLayout, "0xproxy"); // same address, other case
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toEqual(testLayout);
+    expect(process.exitCode).toBe(1);
+    expect(errors).toMatch(/not storage-compatible with its previous baseline/);
+  });
+
+  it("stamps the new layout when the upgrade is compatible", async () => {
+    await run(appendedLayout, "0xProxy");
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toEqual(appendedLayout);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("does not compare a deployment at a new address (a fresh contract)", async () => {
+    await run(otherLayout, "0xNew");
+    expect((await readDeploymentFile("MyContract")).upgradeStorageLayout).toEqual(otherLayout);
+    expect(process.exitCode).toBeUndefined();
   });
 });

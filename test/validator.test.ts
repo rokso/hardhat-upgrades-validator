@@ -1,339 +1,267 @@
 /**
- * Unit tests for validateStorageUpgrade — namespace-level unsafe-allow
- * suppression and global vs namespace vs per-variable precedence.
+ * Unit tests for validateStorageUpgrade, withSafetyErrors and
+ * formatValidationResult. The verdict is OZ's storage comparison; these tests
+ * pin that we pass it through and do not weaken it.
  *
  * Uses synthetic StorageLayout objects (no compiled fixtures required).
  */
 import { describe, it, expect } from "vitest";
-import { validateStorageUpgrade } from "../src/core/validator.js";
+import {
+  validateStorageUpgrade,
+  withSafetyErrors,
+  formatValidationResult,
+} from "../src/core/validator.js";
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
-
-// ---------------------------------------------------------------------------
-// Synthetic layout builders
-// ---------------------------------------------------------------------------
+import type { SafetyError, UnsafeAllowKind } from "../src/types/validation.js";
+import { layout, u256, u128, u160, addr } from "./helpers/layout-builder.js";
 
 const T_U256 = { label: "uint256", numberOfBytes: "32" };
 const T_U128 = { label: "uint128", numberOfBytes: "16" };
-const T_ADDR = { label: "address", numberOfBytes: "20" };
 
-/**
- * Regular (non-namespace) layout with a single variable.
- * Uses the same contract name for old and new to simulate an in-place upgrade.
- */
-function regularLayout(
-  label: string,
-  typeId: "t_uint256" | "t_address",
-  extra?: { renamedFrom?: string },
-): StorageLayout {
-  const item: StorageLayout["storage"][number] = {
-    contract: "MyContract",
-    label,
-    offset: 0,
-    slot: "0",
-    type: typeId,
-    src: "",
-  };
-  if (extra?.renamedFrom !== undefined) item.renamedFrom = extra.renamedFrom;
-  return {
-    storage: [item],
-    types: { t_uint256: T_U256, t_address: T_ADDR },
-  };
+function withRenamedFrom(l: StorageLayout, label: string, from: string): StorageLayout {
+  l.storage.find((s) => s.label === label)!.renamedFrom = from;
+  return l;
 }
 
-/**
- * Namespace-only layout.  Items are placed in layout.namespaces[nsId] with
- * contract = "namespace:" + nsId, which makes OZ set the same prefix on
- * op.original.contract so that namespaceIdFromOp() can extract the nsId.
- *
- * Note: do NOT set renamedFrom on namespace items when testing rename
- * detection — renamedFrom auto-approves same-contract renames (no op
- * emitted).  Slot-based matching (same slot, different label) is used
- * instead, which does produce a rename op.
- */
+function withRetypedFrom(l: StorageLayout, label: string, from: string): StorageLayout {
+  l.storage.find((s) => s.label === label)!.retypedFrom = from;
+  return l;
+}
+
 function nsLayout(
   nsId: string,
-  items: Array<{ label: string; typeId: "t_uint256" | "t_uint128" }>,
+  items: Array<{ label: string; typeId: "t_uint256" | "t_uint128"; renamedFrom?: string }>,
 ): StorageLayout {
   return {
     storage: [],
     types: { t_uint256: T_U256, t_uint128: T_U128 },
     namespaces: {
-      [nsId]: items.map(({ label, typeId }) => ({
+      [nsId]: items.map(({ label, typeId, renamedFrom }, i) => ({
         contract: `namespace:${nsId}`,
         label,
         offset: 0,
-        slot: "0",
+        slot: String(i),
         type: typeId,
         src: "",
+        ...(renamedFrom !== undefined ? { renamedFrom } : {}),
       })),
     },
   };
 }
 
-// ---------------------------------------------------------------------------
-// Namespace-level variable-renamed suppression
-// ---------------------------------------------------------------------------
+const opKinds = (r: ReturnType<typeof validateStorageUpgrade>) =>
+  (r.storage?.ops ?? []).map((op) => op.kind);
 
-describe("namespace-level variable-renamed suppression", () => {
-  const NS = "erc7201:test.v1";
-  // Use slot-based rename detection (same slot, different label) rather than
-  // renamedFrom — renamedFrom auto-approves same-contract renames in OZ.
-  const oldLayout = nsLayout(NS, [{ label: "value", typeId: "t_uint256" }]);
-  const newLayout = nsLayout(NS, [{ label: "renamedValue", typeId: "t_uint256" }]);
-
-  it("reports variable-renamed error when no unsafe-allow is set", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout);
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.kind === "variable-renamed")).toBe(true);
+describe("validateStorageUpgrade: OZ storage verdict", () => {
+  it("passes an append", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a")), layout(u256("a"), u256("b")));
+    expect(r.ok).toBe(true);
+    expect(r.storage?.ok).toBe(true);
   });
 
-  it("suppresses the error with namespaceUnsafeAllow for the matching namespace", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout, {
-      namespaceUnsafeAllow: new Map([[NS, ["variable-renamed"]]]),
-    });
-    expect(result.ok).toBe(true);
-    expect(result.errors).toHaveLength(0);
+  it("fails a removal", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a"), u256("b")), layout(u256("a")));
+    expect(r.ok).toBe(false);
+    expect(opKinds(r)).toEqual(["delete"]);
   });
 
-  it("does NOT suppress when namespaceUnsafeAllow targets a different namespace", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout, {
-      namespaceUnsafeAllow: new Map([["erc7201:other.ns", ["variable-renamed"]]]),
-    });
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.kind === "variable-renamed")).toBe(true);
+  it("fails an insertion in the middle", () => {
+    const r = validateStorageUpgrade(
+      "C",
+      layout(u256("a"), u256("b")),
+      layout(u256("a"), u256("x"), u256("b")),
+    );
+    expect(r.ok).toBe(false);
+    expect(opKinds(r)).toContain("insert");
   });
 
-  it("suppresses via global unsafeAllow as well", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout, {
-      unsafeAllow: ["variable-renamed"],
+  it("fails a type change", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a")), layout(u128("a")));
+    expect(r.ok).toBe(false);
+  });
+
+  it("fails a rename without oz-renamed-from", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a")), layout(u256("b")));
+    expect(r.ok).toBe(false);
+    expect(opKinds(r)).toEqual(["rename"]);
+  });
+
+  it("passes a rename approved with renamedFrom", () => {
+    const r = validateStorageUpgrade(
+      "C",
+      layout(u256("a")),
+      withRenamedFrom(layout(u256("b")), "b", "a"),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("fails a rename whose renamedFrom names another variable", () => {
+    const r = validateStorageUpgrade(
+      "C",
+      layout(u256("a")),
+      withRenamedFrom(layout(u256("b")), "b", "other"),
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it("passes any rename with unsafeAllowRenames (OZ's option)", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a")), layout(u256("b")), {
+      unsafeAllowRenames: true,
     });
-    expect(result.ok).toBe(true);
+    expect(r.ok).toBe(true);
+  });
+
+  it("passes uint160 -> address with retypedFrom (same size, slot known)", () => {
+    const r = validateStorageUpgrade(
+      "C",
+      layout(u160("owner")),
+      withRetypedFrom(layout(addr("owner")), "owner", "uint160"),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("fails a size change even with retypedFrom", () => {
+    const r = validateStorageUpgrade(
+      "C",
+      layout(u256("a"), u256("b")),
+      withRetypedFrom(layout(u128("a"), u256("b")), "a", "uint256"),
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it("fails a removed namespace", () => {
+    const old = nsLayout("erc7201:a", [{ label: "x", typeId: "t_uint256" }]);
+    const r = validateStorageUpgrade("C", old, { storage: [], types: {}, namespaces: {} });
+    expect(r.ok).toBe(false);
+    expect(opKinds(r)).toEqual(["delete-namespace"]);
+  });
+
+  it("fails a namespace member rename without renamedFrom, passes with it", () => {
+    const old = nsLayout("erc7201:a", [{ label: "x", typeId: "t_uint256" }]);
+    const untagged = nsLayout("erc7201:a", [{ label: "y", typeId: "t_uint256" }]);
+    const tagged = nsLayout("erc7201:a", [{ label: "y", typeId: "t_uint256", renamedFrom: "x" }]);
+    expect(validateStorageUpgrade("C", old, untagged).ok).toBe(false);
+    expect(validateStorageUpgrade("C", old, tagged).ok).toBe(true);
+  });
+
+  it("fails a namespace member type change", () => {
+    const old = nsLayout("erc7201:a", [{ label: "x", typeId: "t_uint256" }]);
+    const changed = nsLayout("erc7201:a", [{ label: "x", typeId: "t_uint128" }]);
+    expect(validateStorageUpgrade("C", old, changed).ok).toBe(false);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Namespace-level type-changed suppression
-// ---------------------------------------------------------------------------
-
-describe("namespace-level type-changed suppression", () => {
-  const NS = "erc7201:test.v1";
-  // uint256 → uint128 is a size-changing type change — NOT suppressed by the
-  // same-size layoutchange shortcut, so it reaches our type-changed handling.
-  const oldLayout = nsLayout(NS, [{ label: "value", typeId: "t_uint256" }]);
-  const newLayout = nsLayout(NS, [{ label: "value", typeId: "t_uint128" }]);
-
-  it("reports type-changed error when no unsafe-allow is set", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout);
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.kind === "type-changed")).toBe(true);
+describe("validateStorageUpgrade: no baseline and skip", () => {
+  it("passes with a no-baseline warning when there is no old layout", () => {
+    const r = validateStorageUpgrade("C", undefined, layout(u256("a")));
+    expect(r.ok).toBe(true);
+    expect(r.storage).toBeUndefined();
+    expect(r.warnings).toEqual([{ kind: "no-baseline", contractName: "C" }]);
   });
 
-  it("suppresses the error with namespaceUnsafeAllow for the matching namespace", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout, {
-      namespaceUnsafeAllow: new Map([[NS, ["type-changed"]]]),
+  it("skips the comparison with unsafeSkipStorageCheck", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a")), layout(u128("a")), {
+      unsafeSkipStorageCheck: true,
     });
-    expect(result.ok).toBe(true);
-    expect(result.errors).toHaveLength(0);
-  });
-
-  it("does NOT suppress when namespaceUnsafeAllow targets a different namespace", () => {
-    const result = validateStorageUpgrade("C", oldLayout, newLayout, {
-      namespaceUnsafeAllow: new Map([["erc7201:other.ns", ["type-changed"]]]),
-    });
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.kind === "type-changed")).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.warnings).toEqual([{ kind: "storage-check-skipped", contractName: "C" }]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Global vs namespace vs per-variable precedence
-//
-// Use type changes rather than renames: OZ auto-approves renames on regular
-// storage items when renamedFrom is set (no op emitted), but type changes
-// are always detected.  This gives reliable mixed-scope errors to suppress.
-// ---------------------------------------------------------------------------
-
-describe("unsafe-allow precedence: global vs namespace vs per-variable", () => {
-  const NS = "erc7201:test.v1";
-
-  // Old: regular uint256 "a" + namespace uint256 "x"
-  const oldMixed: StorageLayout = {
-    storage: [
-      {
-        contract: "A",
-        label: "a",
-        offset: 0,
-        slot: "0",
-        type: "t_uint256",
-        src: "",
-      },
-    ],
-    types: { t_uint256: T_U256, t_uint128: T_U128 },
-    namespaces: {
-      [NS]: [
-        {
-          contract: `namespace:${NS}`,
-          label: "x",
-          offset: 0,
-          slot: "0",
-          type: "t_uint256",
-          src: "",
-        },
-      ],
-    },
-  };
-
-  // New: regular uint128 "a" (type changed) + namespace uint128 "x" (type changed)
-  const newMixed: StorageLayout = {
-    storage: [
-      {
-        contract: "A",
-        label: "a",
-        offset: 0,
-        slot: "0",
-        type: "t_uint128",
-        src: "",
-      },
-    ],
-    types: { t_uint256: T_U256, t_uint128: T_U128 },
-    namespaces: {
-      [NS]: [
-        {
-          contract: `namespace:${NS}`,
-          label: "x",
-          offset: 0,
-          slot: "0",
-          type: "t_uint128",
-          src: "",
-        },
-      ],
-    },
-  };
-
-  it("both regular and namespace type changes error without unsafe-allow", () => {
-    const result = validateStorageUpgrade("C", oldMixed, newMixed);
-    expect(result.ok).toBe(false);
-    const typeErrors = result.errors.filter((e) => e.kind === "type-changed");
-    // At least one from regular storage and one from namespace.
-    expect(typeErrors.length).toBeGreaterThanOrEqual(2);
+describe("validateStorageUpgrade: option checks", () => {
+  it("rejects an unsafe-allow value that is not an OZ error kind", () => {
+    expect(() =>
+      validateStorageUpgrade("C", layout(u256("a")), layout(u256("a")), {
+        unsafeAllow: ["type-changed" as UnsafeAllowKind],
+      }),
+    ).toThrow(/Unknown unsafe-allow value\(s\): type-changed/);
   });
 
-  it("global unsafeAllow suppresses all type changes", () => {
-    const result = validateStorageUpgrade("C", oldMixed, newMixed, {
-      unsafeAllow: ["type-changed"],
-    });
-    expect(result.ok).toBe(true);
-    expect(result.errors.filter((e) => e.kind === "type-changed")).toHaveLength(0);
+  it("accepts every OZ error kind", () => {
+    expect(() =>
+      validateStorageUpgrade("C", layout(u256("a")), layout(u256("a")), {
+        unsafeAllow: ["missing-initializer", "missing-public-upgradeto"],
+      }),
+    ).not.toThrow();
   });
 
-  it("namespaceUnsafeAllow suppresses only the namespace type change, not the regular one", () => {
-    const result = validateStorageUpgrade("C", oldMixed, newMixed, {
-      namespaceUnsafeAllow: new Map([[NS, ["type-changed"]]]),
-    });
-    expect(result.ok).toBe(false);
-    const typeErrors = result.errors.filter((e) => e.kind === "type-changed");
-    // Regular type-change still present; namespace suppressed.
-    expect(typeErrors.some((e) => e.kind === "type-changed" && e.label === "a")).toBe(true);
-    expect(typeErrors.some((e) => e.kind === "type-changed" && e.label === "x")).toBe(false);
+  it("rejects an unknown proxy kind", () => {
+    expect(() =>
+      validateStorageUpgrade("C", layout(u256("a")), layout(u256("a")), {
+        kind: "diamond" as never,
+      }),
+    ).toThrow(/Invalid proxy kind/);
+  });
+});
+
+const CONSTRUCTOR_ERROR = {
+  kind: "constructor",
+  contract: "C",
+  src: "contracts/C.sol:5",
+} as SafetyError;
+
+describe("withSafetyErrors", () => {
+  it("fails a passing storage result when there is a safety error", () => {
+    const r = withSafetyErrors(validateStorageUpgrade("C", layout(u256("a")), layout(u256("a"))), [
+      CONSTRUCTOR_ERROR,
+    ]);
+    expect(r.ok).toBe(false);
+    expect(r.safetyErrors).toEqual([CONSTRUCTOR_ERROR]);
   });
 
-  it("perVariableUnsafeAllow suppresses only the named regular variable", () => {
-    // Two regular variables with type changes; only one is suppressed.
-    const oldTwo: StorageLayout = {
-      storage: [
-        {
-          contract: "A",
-          label: "alpha",
-          offset: 0,
-          slot: "0",
-          type: "t_uint256",
-          src: "",
-        },
-        {
-          contract: "A",
-          label: "beta",
-          offset: 0,
-          slot: "1",
-          type: "t_uint256",
-          src: "",
-        },
-      ],
-      types: { t_uint256: T_U256, t_uint128: T_U128 },
+  it("fails even without a baseline", () => {
+    const r = withSafetyErrors(validateStorageUpgrade("C", undefined, layout(u256("a"))), [
+      CONSTRUCTOR_ERROR,
+    ]);
+    expect(r.ok).toBe(false);
+  });
+
+  it("keeps a passing result when there are no safety errors", () => {
+    const r = withSafetyErrors(
+      validateStorageUpgrade("C", layout(u256("a")), layout(u256("a"))),
+      [],
+    );
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("formatValidationResult", () => {
+  it("prints one OK line for a clean pass", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a")), layout(u256("a")));
+    expect(formatValidationResult("net/C", r)).toBe(
+      '  [OK]   "net/C": storage layout validation passed.',
+    );
+  });
+
+  it("prints OZ's explanation for a storage failure", () => {
+    const r = validateStorageUpgrade("C", layout(u256("a"), u256("b")), layout(u256("a")));
+    const text = formatValidationResult("net/C", r);
+    expect(text).toContain('StorageLayoutError: Storage layout validation failed for "net/C"');
+    expect(text).toContain("Deleted `b`");
+  });
+
+  it("prints OZ's explanation for a safety error", () => {
+    const r = withSafetyErrors(validateStorageUpgrade("C", layout(u256("a")), layout(u256("a"))), [
+      CONSTRUCTOR_ERROR,
+    ]);
+    const text = formatValidationResult("net/C", r);
+    expect(text).toContain("contracts/C.sol:5");
+    expect(text).toContain("Contract `C` has a constructor");
+  });
+
+  it("prints the no-baseline note", () => {
+    const r = validateStorageUpgrade("C", undefined, layout(u256("a")));
+    expect(formatValidationResult("net/C", r)).toContain('No prior deployment found for "C"');
+  });
+});
+
+describe("UNSAFE_ALLOW_KINDS", () => {
+  it("matches the error kinds of the installed upgrades-core", async () => {
+    // errorKinds is not exported from upgrades-core's index; read it from its module.
+    const { errorKinds } = (await import("@openzeppelin/upgrades-core/dist/validate/run.js")) as {
+      errorKinds: readonly string[];
     };
-    const newTwo: StorageLayout = {
-      storage: [
-        {
-          contract: "A",
-          label: "alpha",
-          offset: 0,
-          slot: "0",
-          type: "t_uint128",
-          src: "",
-        },
-        {
-          contract: "A",
-          label: "beta",
-          offset: 0,
-          slot: "1",
-          type: "t_uint128",
-          src: "",
-        },
-      ],
-      types: { t_uint256: T_U256, t_uint128: T_U128 },
-    };
-    const result = validateStorageUpgrade("C", oldTwo, newTwo, {
-      perVariableUnsafeAllow: new Map([["alpha", ["type-changed"]]]),
-    });
-    expect(result.ok).toBe(false);
-    const typeErrors = result.errors.filter((e) => e.kind === "type-changed");
-    // "alpha" suppressed; "beta" still errors.
-    expect(typeErrors.some((e) => e.kind === "type-changed" && e.label === "alpha")).toBe(false);
-    expect(typeErrors.some((e) => e.kind === "type-changed" && e.label === "beta")).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// In-place upgrade — same contract name (same `contract` field in both layouts)
-//
-// Simulates the real-world case where a deployed contract is upgraded in-place:
-// the old baseline and the newly compiled layout share the same contract name.
-// ---------------------------------------------------------------------------
-
-describe("in-place upgrade: same contract name", () => {
-  it("detects type change (uint256 → address, same label)", () => {
-    const old = regularLayout("abc", "t_uint256");
-    const updated = regularLayout("abc", "t_address");
-
-    const result = validateStorageUpgrade("MyContract", old, updated);
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.kind === "type-changed")).toBe(true);
-  });
-
-  it("detects rename without annotation", () => {
-    const old = regularLayout("abc", "t_uint256");
-    const updated = regularLayout("xyz", "t_uint256");
-
-    const result = validateStorageUpgrade("MyContract", old, updated);
-    expect(result.ok).toBe(false);
-    expect(result.errors.length).toBeGreaterThan(0);
-  });
-
-  it("accepts rename with correct renamedFrom annotation", () => {
-    const old = regularLayout("abc", "t_uint256");
-    const updated = regularLayout("xyz", "t_uint256", { renamedFrom: "abc" });
-
-    const result = validateStorageUpgrade("MyContract", old, updated);
-    expect(result.ok).toBe(true);
-    expect(result.errors).toHaveLength(0);
-  });
-
-  it("rejects rename with wrong renamedFrom annotation", () => {
-    const old = regularLayout("abc", "t_uint256");
-    // renamedFrom points to a label that does not exist in the old layout
-    const updated = regularLayout("xyz", "t_uint256", { renamedFrom: "wrong" });
-
-    const result = validateStorageUpgrade("MyContract", old, updated);
-    expect(result.ok).toBe(false);
-    expect(result.errors.length).toBeGreaterThan(0);
+    const { UNSAFE_ALLOW_KINDS } = await import("../src/types/validation.js");
+    expect([...UNSAFE_ALLOW_KINDS].sort()).toEqual([...errorKinds].sort());
   });
 });

@@ -14,9 +14,11 @@ export { StorageLayoutError } from "./proxy/validate-proxy.js";
 
 export type {
   StorageLayout,
+  StorageReport,
+  SafetyError,
   ValidationResult,
-  ValidationError,
   ValidationWarning,
   UnsafeAllowKind,
   ValidateOptions,
+  ProxyKind,
 } from "./types/validation.js";
