@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.1.0-alpha.2)
+## 0.1.0-alpha.2 (2026-10-08)
 
 All checks, tags and error messages are now OpenZeppelin's. This plugin keeps the baseline and one annotation for struct members.
 
