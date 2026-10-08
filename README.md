@@ -2,13 +2,13 @@
 
 Hardhat v3 plugin that validates storage layout compatibility for upgradeable proxy contracts managed by [hardhat-deploy v2](https://github.com/wighawag/hardhat-deploy).
 
-Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzeppelin-upgrades/tree/master/packages/upgrades-core) — the same engine that backs `@openzeppelin/hardhat-upgrades`.
+Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzeppelin-upgrades/tree/master/packages/upgrades-core), the same engine that backs `@openzeppelin/hardhat-upgrades`. Every check, annotation and error message is OpenZeppelin's: this plugin adds the baseline that hardhat-deploy projects lack (OZ keeps it in `.openzeppelin/<network>.json`, which hardhat-deploy does not write) and one annotation for struct members.
 
 ## Requirements
 
-- Hardhat **v3**
-- hardhat-deploy **v2** (optional — proxy helper works with any deploy tool)
-- Node.js **>= 18**
+- Hardhat **v3.6** or later
+- hardhat-deploy **v2** (optional; the proxy helper works with any deploy tool)
+- Node.js **22** or later
 
 ## Installation
 
@@ -31,18 +31,13 @@ const config: HardhatUserConfig = {
 
   solidity: {
     version: "0.8.24",
-    settings: {
-      // The plugin injects storageLayout, devdoc, and ast automatically.
-      // Declaring them explicitly here is optional but makes the dependency clear.
-      outputSelection: {
-        "*": { "*": ["storageLayout", "devdoc", "ast"] },
-      },
-    },
+    // The plugin asks solc for storageLayout and ast itself, added to
+    // whatever outputSelection you configure.
   },
 
   upgradesValidator: {
     enableCompileHook: true, // default
-    networks: "all", // default — validate every network in deployments/
+    networks: "all", // default: validate every network in deployments/
   },
 };
 
@@ -53,7 +48,7 @@ That's the setup. See [Workflow](#workflow) for the deploy, baseline, and upgrad
 
 ## How it works
 
-The plugin operates through four validation paths — all backed by the same storage-diff engine:
+The plugin operates through four validation paths, all running the same OZ checks:
 
 | Path                        | When it runs       | What it does                                                                       |
 | --------------------------- | ------------------ | ---------------------------------------------------------------------------------- |
@@ -62,11 +57,20 @@ The plugin operates through four validation paths — all backed by the same sto
 | **`assertProxyUpgrade`**    | Scripts, CI, tests | Throws if storage is incompatible; typically used just before upgrading            |
 | **`validateProxyUpgrade`**  | Scripts, CI, tests | Same, returns a result instead of throwing                                         |
 
-The ValidationData cache (written to `cache/validations.json` on each compile) is shared across all four paths so build-info files are parsed only once per compile.
+Each path runs two OZ checks and fails on either. (The compile hook is the exception for a contract it cannot check, such as one missing from the validation cache: it names it as skipped and does not fail the build. The other paths fail.)
+
+- **Storage layout:** OZ's comparison of the baseline layout with the compiled one (`getStorageUpgradeReport`). Any change OZ reports fails the upgrade.
+- **Upgrade safety:** all of OZ's checks on the new implementation (`getErrors`): constructors, `delegatecall`, `selfdestruct`, immutables, inline assignments, linked libraries, initializers, and a missing `upgradeTo` for UUPS proxies. The proxy kind is inferred by OZ from the new implementation unless you pass `--proxy-kind` (task) or `kind` (proxy helpers). OZ infers `uups` only when the new implementation has `upgradeTo`, so **an implementation that drops `upgradeTo` (which bricks a UUPS proxy) is caught only when you pass the kind**; the compile hook cannot, since it has no kind setting.
+
+The ValidationData cache (`cache/hardhat-upgrades-validator/validations-*.json`, named after the plugin's cache format and the upgrades-core version) is shared across all four paths so build-info files are parsed only once per compile. It is removed while a build runs and written back only when every compiled job was validated, so a failed or interrupted build forces a full recompile next time instead of leaving contracts out. A contract missing from the cache fails `validate-upgrade`, `record-baseline` and the proxy helpers; the compile hook names it as skipped.
+
+### What the baseline is
+
+The baseline is the layout stamped into the deployment file (`upgradeStorageLayout`) when the deploy hook or `record-baseline` last ran. It describes the code this repository deployed, not necessarily what the proxy runs on chain: if an upgrade is queued (for example in a multisig) or done outside these tools, the two drift until the baseline is recorded again.
 
 ## Workflow
 
-> **Adding to an existing project?** If you already have deployed proxies, run `record-baseline` once to stamp their current layouts before validation will do anything useful:
+> **Adding to an existing project?** If you already have deployed proxies, run `record-baseline` once to stamp their current layouts before validation will do anything useful. Check out the code each proxy runs first: the task refuses to record when the compiled bytecode does not match the deployment file.
 >
 > ```sh
 > npx hardhat compile
@@ -85,7 +89,7 @@ export default deployScript(
   async ({ deployViaProxy, namedAccounts }) => {
     const { deployer } = namedAccounts;
 
-    // No baseline yet — this is a no-op on first deploy.
+    // No baseline yet: this is a no-op on first deploy.
     await assertProxyUpgrade(hre, "MyToken");
 
     await deployViaProxy(
@@ -102,7 +106,7 @@ export default deployScript(
 );
 ```
 
-The deploy hook stamps the baseline automatically after the deploy completes.
+The deploy hook stamps the baseline automatically after the deploy completes. It needs `--network`, and records nothing under hardhat-deploy's fork mode (`HARDHAT_FORK`), where deployments exist only on the fork.
 
 ### Standard upgrade
 
@@ -137,9 +141,9 @@ npx hardhat compile   # compile hook validates the recorded baseline immediately
 npx hardhat deploy --tags MyTokenUpgrade --network mainnet
 ```
 
-The deploy hook stamps the updated layout into `MyToken.json` after the deploy.
+The deploy hook stamps the updated layout into `MyToken.json` after the deploy. hardhat-deploy rewrites that file on an upgrade, so the hook snapshots each baseline before the deploy and checks what was deployed at the same address against it. If it is incompatible, the deploy has already happened, but the hook keeps the old baseline (so validation keeps failing), prints OZ's report and exits 1. Call `assertProxyUpgrade` before deploying, as above, to stop it first: the compile hook's verdict does not stop `hardhat deploy`.
 
-### Upgrading to a new implementation contract (MyToken → MyTokenV2)
+### Upgrading to a new implementation contract (MyToken to MyTokenV2)
 
 When the new implementation lives in a separate file (`MyTokenV2.sol`) and the proxy deployment record is still named after the old contract (`MyToken`), use `newImpl` to tell the validator which artifact to check:
 
@@ -169,7 +173,7 @@ export default deployScript(async ({ deployViaProxy, namedAccounts }) => {
 
 ## Configuration
 
-All options are optional and apply to the **compile hook only**. The `validate-upgrade` task and proxy helpers (`assertProxyUpgrade`, `validateProxyUpgrade`) are not affected by these settings — they use CLI flags and call options respectively.
+All options are optional and apply to the **compile hook only**. The `validate-upgrade` task and proxy helpers (`assertProxyUpgrade`, `validateProxyUpgrade`) are not affected by these settings; they use CLI flags and call options respectively.
 
 ```ts
 upgradesValidator: {
@@ -189,7 +193,7 @@ upgradesValidator: {
 
 ### `record-baseline`
 
-Stamps the current compiled storage layout into the deployment JSON as the upgrade baseline. Safe to re-run — skips contracts that already have a baseline unless `--force` is passed.
+Stamps the current compiled storage layout into the deployment JSON as the upgrade baseline. Safe to re-run: skips contracts that already have a baseline unless `--force` is passed.
 
 ```sh
 npx hardhat record-baseline --all --network mainnet
@@ -201,10 +205,12 @@ npx hardhat record-baseline --all --network mainnet --force   # overwrite existi
 | ------------------- | ---------------------------------------------------------------- |
 | `--contract <name>` | Record a single contract                                         |
 | `--all`             | Record all deployed contracts                                    |
-| `--network <name>`  | Restrict to one network directory under `deployments/`           |
+| `--network <name>`  | Hardhat's global option: restrict to that network's directory    |
 | `--force`           | Overwrite existing baselines; also skips bytecode mismatch check |
 
-Bytecode verification: the task compares the local artifact's `deployedBytecode` against the value stored in the deployment JSON. If they don't match (code has changed since the last deploy), it skips and warns. Use `--force` to override.
+Bytecode verification: the task compares the local artifact's `deployedBytecode` against the value stored in the deployment JSON. If they don't match (code has changed since the last deploy), it skips and warns. Use `--force` to override. A contract missing from the validation cache fails the task (exit code 1).
+
+Without `--network`, both tasks process every directory under `deployments/`.
 
 ### `validate-upgrade`
 
@@ -213,18 +219,21 @@ Compares all recorded baselines against the current compiled artifacts. Useful i
 ```sh
 npx hardhat validate-upgrade --all
 npx hardhat validate-upgrade --contract MyToken --network mainnet
-npx hardhat validate-upgrade --all --unsafe-allow "variable-renamed"
+npx hardhat validate-upgrade --all --unsafe-allow "constructor delegatecall"
 npx hardhat validate-upgrade --all --unsafe-skip-storage-check   # emergency escape hatch
 ```
 
-| Flag                          | Description                                            |
-| ----------------------------- | ------------------------------------------------------ |
-| `--contract <name>`           | Validate a single contract                             |
-| `--all`                       | Validate all contracts with a baseline                 |
-| `--network <name>`            | Restrict to one network directory under `deployments/` |
-| `--unsafe-allow <kinds>`      | Space/comma-separated list of checks to bypass         |
-| `--unsafe-skip-storage-check` | Skip all storage checks (emits a loud warning)         |
-| `--proxy-kind <kind>`         | Override proxy kind (`transparent`, `uups`, `beacon`)  |
+| Flag                          | Description                                           |
+| ----------------------------- | ----------------------------------------------------- |
+| `--contract <name>`           | Validate a single contract                            |
+| `--all`                       | Validate all contracts with a baseline                |
+| `--network <name>`            | Hardhat's global option: restrict to that network     |
+| `--unsafe-allow <kinds>`      | Space/comma-separated OZ error kinds to allow         |
+| `--unsafe-allow-renames`      | Allow renames without `@custom:oz-renamed-from`       |
+| `--unsafe-skip-storage-check` | Skip all storage checks (emits a loud warning)        |
+| `--proxy-kind <kind>`         | Override proxy kind (`transparent`, `uups`, `beacon`) |
+
+Every deployment with a baseline is validated. The task fails (exit code 1) when a contract cannot be checked: its artifact is missing, it is missing from the validation cache, or (with `--contract`) the deployment exists without a baseline and the chain does not show it is a plain contract.
 
 ## Proxy helper API
 
@@ -247,7 +256,8 @@ await assertProxyUpgrade(hre, "MyToken");
 
 // With options:
 await assertProxyUpgrade(hre, "MyToken", {
-  unsafeAllow: ["variable-renamed"],
+  unsafeAllow: ["constructor"], // OZ error kinds
+  unsafeAllowRenames: false,
   unsafeSkipStorageCheck: false, // set to true to skip all storage checks (emergency escape hatch)
   newImpl: "MyTokenV2", // validate against this artifact instead of what's in the deployment record
 });
@@ -255,12 +265,17 @@ await assertProxyUpgrade(hre, "MyToken", {
 
 ### `validateProxyUpgrade(hre, contractName, options?)`
 
+Both throw when the deployment file exists but has no `upgradeStorageLayout`: that is not a first deployment, so there is nothing to check against. Run `record-baseline` first.
+
 Same logic, but returns a `ValidationResult` instead of throwing. Use when you want to inspect or log the result programmatically.
 
 ```ts
+import { formatValidationResult } from "hardhat-upgrades-validator";
+
 const result = await validateProxyUpgrade(hre, "MyToken");
 if (!result.ok) {
-  console.error(result.errors);
+  // result.storage is OZ's storage report, result.safetyErrors OZ's safety errors.
+  console.error(formatValidationResult("MyToken", result));
   process.exit(1);
 }
 ```
@@ -269,88 +284,83 @@ if (!result.ok) {
 
 | Option                   | Type                | Description                                                                                       |
 | ------------------------ | ------------------- | ------------------------------------------------------------------------------------------------- |
-| `unsafeAllow`            | `UnsafeAllowKind[]` | Bypass specific checks for this call                                                              |
+| `unsafeAllow`            | `UnsafeAllowKind[]` | OZ error kinds to allow for this call                                                             |
+| `unsafeAllowRenames`     | `boolean`           | Allow renames without `@custom:oz-renamed-from` (OZ's option)                                     |
 | `unsafeSkipStorageCheck` | `boolean`           | Skip all storage checks                                                                           |
 | `newImpl`                | `string`            | Validate against a different compiled artifact instead of the one recorded in the deployment JSON |
+| `kind`                   | `ProxyKind`         | `"transparent"`, `"uups"` or `"beacon"`; pass `"uups"` so a dropped `upgradeTo` is caught         |
 
 ## unsafe-allow kinds
 
-Used in `--unsafe-allow` (validate task) and `unsafeAllow` (proxy helper options). Each kind bypasses a specific class of error.
+`--unsafe-allow` (validate task) and `unsafeAllow` (proxy helper options) take OZ's error kinds, the same values as OZ's `unsafeAllow`. Each allows one class of safety error for the whole call.
 
-| Kind                        | What it bypasses                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `variable-renamed`          | Storage variable was renamed (use `@custom:upgrades-validator-renamed-from` per variable for a more precise alternative)  |
-| `type-changed`              | Storage variable type changed (use `@custom:upgrades-validator-retyped-from` per variable for a more precise alternative) |
-| `constructor`               | Contract has a non-empty constructor                                                                                      |
-| `delegatecall`              | Contract uses `delegatecall`                                                                                              |
-| `selfdestruct`              | Contract uses `selfdestruct`                                                                                              |
-| `state-variable-immutable`  | Contract declares an immutable variable                                                                                   |
-| `state-variable-assignment` | Contract assigns a value to a state variable at declaration                                                               |
-| `external-library-linking`  | Contract links to an external library                                                                                     |
+| Kind                          | What it allows                                                        |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `constructor`                 | A constructor                                                         |
+| `delegatecall`                | Use of `delegatecall`                                                 |
+| `selfdestruct`                | Use of `selfdestruct`                                                 |
+| `state-variable-immutable`    | An immutable variable                                                 |
+| `state-variable-assignment`   | A state variable assigned at declaration                              |
+| `external-library-linking`    | A linked external library                                             |
+| `struct-definition`           | Deprecated by OZ; structs are checked automatically                   |
+| `enum-definition`             | Deprecated by OZ; enums are checked automatically                     |
+| `internal-function-storage`   | An internal function pointer stored in storage                        |
+| `missing-public-upgradeto`    | A UUPS implementation without a public `upgradeTo`/`upgradeToAndCall` |
+| `missing-initializer`         | No initializer although a parent has one                              |
+| `missing-initializer-call`    | An initializer that does not call a parent's initializer              |
+| `duplicate-initializer-call`  | An initializer that calls a parent's initializer twice                |
+| `incorrect-initializer-order` | Parent initializers called out of order (OZ reports it as a warning)  |
 
-Prefer NatSpec annotations over `unsafeAllow` where possible — annotations are scoped to the specific variable or contract they apply to, while `unsafeAllow` bypasses the check globally for the entire validation call.
+Storage layout changes have no kind: approve each one with a tag (below), or use `unsafeAllowRenames` for renames. Prefer the scoped `@custom:oz-upgrades-unsafe-allow` tag over a call-wide `unsafeAllow`.
 
 ## NatSpec annotations
 
-Annotations let you declare intentional storage changes so the validator doesn't flag them as errors.
+Annotations declare intentional changes so the validator does not flag them.
 
-### State variable annotations
+### OZ's tags
 
-Place on the state variable (or the struct field for namespace structs):
+State variables, contracts and functions use OpenZeppelin's own tags, with OZ's semantics:
 
 ```solidity
-/// @custom:upgrades-validator-renamed-from oldName
+/// @custom:oz-renamed-from oldName
 uint256 public newName;
 
-/// @custom:upgrades-validator-retyped-from uint128
-uint256 public value;
+/// @custom:oz-retyped-from uint160
+address public owner;
 
-/// @custom:upgrades-validator-unsafe-allow state-variable-assignment
+/// @custom:oz-upgrades-unsafe-allow state-variable-assignment
 uint256 public initializedValue = 42;
+
+/// @custom:oz-upgrades-unsafe-allow constructor
+constructor() {
+    _disableInitializers();
+}
+
+/// @custom:oz-upgrades-unsafe-allow-reachable delegatecall
+function multicall(bytes[] calldata data) external { ... }
 ```
 
-### Contract-level unsafe-allow
+A retype passes only when OZ can prove the new type has the same size and position (for example `uint160` to `address`); a size change still fails.
 
-Place on the contract or its `constructor` NatSpec:
+### Struct member tags (this plugin's extension)
+
+Solidity has no NatSpec on struct members, so OZ cannot read rename or retype tags for them. Put them on the struct, one per member, old name or type first:
 
 ```solidity
-/// @custom:upgrades-validator-unsafe-allow constructor
-contract MyImplementation {
-    constructor() {
-        _disableInitializers();
-    }
+/// @custom:upgrades-validator-renamed-from oldBalance balance
+/// @custom:upgrades-validator-retyped-from uint160 owner
+struct Account {
+    uint256 balance;
+    address owner;
 }
 ```
 
-Multiple kinds can be space- or comma-separated:
+This works for structs declared in the contract or one of its base contracts, plain or ERC-7201 namespace (`@custom:storage-location`). Tags on file-level or library structs are not read, and an old type must be a single token (no spaces, so not `mapping(...)` or function types); in both cases the change fails as untagged.
 
-```solidity
-/// @custom:upgrades-validator-unsafe-allow constructor delegatecall
-```
-
-### Struct member annotations (regular and namespace structs)
-
-For members inside a struct, the annotation goes on the struct definition and uses a two-token format: `memberName oldValue`:
-
-```solidity
-/// @custom:upgrades-validator-renamed-from newBalance oldBalance
-/// @custom:upgrades-validator-retyped-from newBalance uint128
-struct MyStruct {
-    uint256 newBalance;
-}
-```
-
-### Annotation reference
-
-| Annotation                                                   | Scope                                 | Description                                        |
-| ------------------------------------------------------------ | ------------------------------------- | -------------------------------------------------- |
-| `@custom:upgrades-validator-renamed-from <oldName>`          | State variable                        | Variable was renamed from `oldName`                |
-| `@custom:upgrades-validator-retyped-from <oldType>`          | State variable                        | Variable type changed from `oldType`               |
-| `@custom:upgrades-validator-unsafe-allow <kind>`             | Contract, constructor, state variable | Bypass a specific check                            |
-| `@custom:upgrades-validator-renamed-from <member> <oldName>` | Struct definition                     | Struct member `member` was renamed from `oldName`  |
-| `@custom:upgrades-validator-retyped-from <member> <oldType>` | Struct definition                     | Struct member `member` type changed from `oldType` |
-
-Valid `unsafe-allow` kinds: `constructor`, `delegatecall`, `selfdestruct`, `state-variable-immutable`, `state-variable-assignment`, `external-library-linking`, `variable-renamed`, `type-changed`.
+| Annotation                                                   | Scope             | Description                                        |
+| ------------------------------------------------------------ | ----------------- | -------------------------------------------------- |
+| `@custom:upgrades-validator-renamed-from <oldName> <member>` | Struct definition | Struct member `member` was renamed from `oldName`  |
+| `@custom:upgrades-validator-retyped-from <oldType> <member>` | Struct definition | Struct member `member` type changed from `oldType` |
 
 ## How baselines are stored
 
