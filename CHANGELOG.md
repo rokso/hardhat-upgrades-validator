@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased (0.1.0-alpha.3)
+
+The baseline is now what each proxy runs on chain.
+
+### Added
+
+- Chain baselines: the old layout is the layout of the implementation each proxy runs, read from its ERC-1967 slot (or beacon), from layout records keyed by implementation address under `deployments/<network>/.storage-layouts/`. Records are proven against the deployed bytecode and meant to be committed.
+- `record-baseline --from-chain` rebuilds a record from verified source (Etherscan v2 or any Etherscan-compatible explorer) for proxies running code the local tree has moved past. New config: `upgradesValidator.explorers`, `upgradesValidator.solcCacheDir`.
+- Proxies are found from the chain and file contents, never from file names. A proxy index records which implementation each proxy ran, refreshed by every run that reads the chain, so the compile hook and RPC-less CI validate offline ("as of block N").
+- Results say where the baseline came from (`ValidationResult.baseline`).
+- The proxy helpers take `provider` (for in-process networks).
+- Layouts are proven and rebuilt by [slotdiff](https://github.com/rokso/slotdiff), a new framework-agnostic package this plugin now depends on. Use it directly outside Hardhat.
+
+### Changed
+
+- A local build proves its layout only when it embeds solc's metadata hash. Builds with `bytecodeHash: "none"` or `appendCBOR: false` compile identical code for different layouts, so their layouts are no longer recorded from the local build.
+- A layout record is used only on the chain it was made on.
+- An upgrade made by `hardhat deploy` is checked against what the proxy ran on chain just before the deploy; an incompatible one, or one that cannot be checked, exits 1, and the error names the implementation to roll back to.
+
+### Fixed
+
+- With `bytecodeHash: "none"`, two contracts that compile to identical code could swap storage layouts, safety errors and proxy kind, because OZ looks contracts up by bytecode. The lookup now lands on the artifact asked for. This also affects 0.1.0-alpha.2.
+
+### Breaking (alpha)
+
+- Adopting: run `record-baseline --all --network <name>` once per network (add `--from-chain` for proxies running older code), and commit `.storage-layouts/`. Online, a proxy whose implementation has no record fails until it is recorded (with an explorer configured, validation records it on first use).
+- The deploy hook and `record-baseline` write records and the proxy index, not `upgradeStorageLayout`. The field is deprecated and read only as an offline fallback, with a warning. `record-baseline` needs an RPC.
+- `validate-upgrade --all` covers every proxy found on the chain (offline: in the proxy index).
+
 ## 0.1.0-alpha.2 (2026-10-08)
 
 All checks, tags and error messages are now OpenZeppelin's. This plugin keeps the baseline and one annotation for struct members.
