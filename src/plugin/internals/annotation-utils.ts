@@ -1,16 +1,22 @@
 // src/plugin/annotation-utils.ts
-// Utilities for extracting and embedding upgrades-validator annotations from build-info and into OZ layouts
+// Struct-member rename/retype tags: the one annotation OZ does not extract.
+//
+// OZ reads `@custom:oz-renamed-from` / `@custom:oz-retyped-from` on state
+// variables, and its comparator honors `renamedFrom` / `retypedFrom` on struct
+// members, but its extraction never sets them on members (Solidity has no
+// NatSpec on struct members). So the tags go on the struct's own NatSpec:
+//
+//   @custom:upgrades-validator-renamed-from <oldName> <member>
+//   @custom:upgrades-validator-retyped-from <oldType> <member>
+//
+// This covers plain structs (keyed by canonical name) and ERC-7201 namespace
+// structs (keyed by `@custom:storage-location`).
 
 import { astDereferencer } from "solidity-ast/utils.js";
-import type { UnsafeAllowKind } from "../../types/validation.js";
 import type { BuildInfoParsed } from "./build-info-utils.js";
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
 
-// Annotation name constants
 const ANNOTATION_PREFIX = "upgrades-validator";
-const ANN_RENAMED_FROM = `custom:${ANNOTATION_PREFIX}-renamed-from` as const;
-const ANN_RETYPED_FROM = `custom:${ANNOTATION_PREFIX}-retyped-from` as const;
-const ANN_UNSAFE_ALLOW = `custom:${ANNOTATION_PREFIX}-unsafe-allow` as const;
 
 const STORAGE_LOCATION_RE = /@custom:storage-location\s+(\S+)/;
 const MEMBER_RENAMED_FROM_RE = new RegExp(
@@ -22,71 +28,45 @@ const MEMBER_RETYPED_FROM_RE = new RegExp(
   "g",
 );
 
+/** member label -> old name or old type, per struct canonical name or namespace id */
+type MemberMaps = Map<string, Map<string, string>>;
+
+export interface StructMemberAnnotations {
+  namespaceMemberRename: MemberMaps;
+  namespaceMemberRetype: MemberMaps;
+  structMemberRename: MemberMaps;
+  structMemberRetype: MemberMaps;
+}
+
 function getDocText(doc: { text: string } | string | undefined): string {
   if (!doc) return "";
   return typeof doc === "string" ? doc : doc.text;
 }
 
-export function extractAnnotationMaps(
+function memberMap(re: RegExp, doc: string): Map<string, string> {
+  const map = new Map<string, string>();
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(doc)) !== null) {
+    map.set(m[2]!, m[1]!);
+  }
+  return map;
+}
+
+export function extractStructMemberAnnotations(
   parsed: BuildInfoParsed,
   simpleContractName: string,
   winnerSource: string,
-  parseUnsafeAllowAnnotation: (raw: unknown, context?: string) => UnsafeAllowKind[],
-): {
-  renameAnnotations: Map<string, string>;
-  retypeAnnotations: Map<string, string>;
-  perVariableUnsafeAllow: Map<string, UnsafeAllowKind[]>;
-  namespaceUnsafeAllow: Map<string, UnsafeAllowKind[]>;
-  namespaceMemberRenameAnnotations: Map<string, Map<string, string>>;
-  namespaceMemberRetypeAnnotations: Map<string, Map<string, string>>;
-  structMemberRenameAnnotations: Map<string, Map<string, string>>;
-  structMemberRetypeAnnotations: Map<string, Map<string, string>>;
-  unsafeAllowFromAnnotation: UnsafeAllowKind[];
-} {
-  const { contracts, sources } = parsed;
-  const winner = contracts[winnerSource]?.[simpleContractName];
-
-  // --- State variable annotations from devdoc ---
-  const renameAnnotations = new Map<string, string>();
-  const retypeAnnotations = new Map<string, string>();
-  const perVariableUnsafeAllow = new Map<string, UnsafeAllowKind[]>();
-
-  for (const [label, tags] of Object.entries(winner?.devdoc?.stateVariables ?? {})) {
-    const oldLabel = tags[ANN_RENAMED_FROM];
-    if (typeof oldLabel === "string" && oldLabel.trim() !== "") {
-      renameAnnotations.set(label, oldLabel.trim().split(/\s+/)[0]!);
-    }
-    const oldType = tags[ANN_RETYPED_FROM];
-    if (typeof oldType === "string" && oldType.trim() !== "") {
-      retypeAnnotations.set(label, oldType.trim().split(/\s+/)[0]!);
-    }
-    const varKinds = parseUnsafeAllowAnnotation(
-      tags[ANN_UNSAFE_ALLOW],
-      `contract ${simpleContractName}, variable "${label}"`,
-    );
-    if (varKinds.length > 0) perVariableUnsafeAllow.set(label, varKinds);
-  }
-
-  // Merge contract-level and constructor-method-level unsafe-allow annotations.
-  const contractLevelAllow = parseUnsafeAllowAnnotation(
-    winner?.devdoc?.[ANN_UNSAFE_ALLOW],
-    `contract ${simpleContractName}`,
-  );
-  const constructorLevelAllow = parseUnsafeAllowAnnotation(
-    winner?.devdoc?.methods?.["constructor"]?.[ANN_UNSAFE_ALLOW],
-    `contract ${simpleContractName} constructor`,
-  );
-  const unsafeAllowFromAnnotation = [...new Set([...contractLevelAllow, ...constructorLevelAllow])];
-
-  // --- Struct NatSpec annotations from AST ---
-  const namespaceMemberRenameAnnotations = new Map<string, Map<string, string>>();
-  const namespaceMemberRetypeAnnotations = new Map<string, Map<string, string>>();
-  const structMemberRenameAnnotations = new Map<string, Map<string, string>>();
-  const structMemberRetypeAnnotations = new Map<string, Map<string, string>>();
-  const namespaceUnsafeAllow = new Map<string, UnsafeAllowKind[]>();
+): StructMemberAnnotations {
+  const result: StructMemberAnnotations = {
+    namespaceMemberRename: new Map(),
+    namespaceMemberRetype: new Map(),
+    structMemberRename: new Map(),
+    structMemberRetype: new Map(),
+  };
 
   const sourcesWithAst = Object.fromEntries(
-    Object.entries(sources).filter(([, v]) => v.ast != null),
+    Object.entries(parsed.sources).filter(([, v]) => v.ast != null),
   ) as Record<string, { ast: unknown }>;
 
   const contractDef = (
@@ -97,108 +77,57 @@ export function extractAnnotationMaps(
       (n as { name: string }).name === simpleContractName,
   ) as { linearizedBaseContracts?: number[] } | undefined;
 
-  if (contractDef?.linearizedBaseContracts) {
-    const deref = astDereferencer({ sources: sourcesWithAst as never });
+  if (!contractDef?.linearizedBaseContracts) return result;
 
-    for (const baseId of contractDef.linearizedBaseContracts) {
-      let baseDef: { nodes?: unknown[] } | undefined;
-      try {
-        baseDef = deref("ContractDefinition", baseId) as unknown as {
-          nodes?: unknown[];
-        };
-      } catch {
-        continue;
-      }
+  const deref = astDereferencer({ sources: sourcesWithAst as never });
 
-      for (const node of baseDef?.nodes ?? []) {
-        if ((node as { nodeType: string }).nodeType !== "StructDefinition") continue;
-        const structDoc = getDocText(
-          (node as { documentation?: { text: string } | string }).documentation,
-        );
-        if (!structDoc) continue;
+  for (const baseId of contractDef.linearizedBaseContracts) {
+    let baseDef: { nodes?: unknown[] } | undefined;
+    try {
+      baseDef = deref("ContractDefinition", baseId) as unknown as { nodes?: unknown[] };
+    } catch {
+      continue;
+    }
 
-        const renameMap = new Map<string, string>();
-        MEMBER_RENAMED_FROM_RE.lastIndex = 0;
-        let rm: RegExpExecArray | null;
-        while ((rm = MEMBER_RENAMED_FROM_RE.exec(structDoc)) !== null) {
-          renameMap.set(rm[2]!, rm[1]!);
-        }
+    for (const node of baseDef?.nodes ?? []) {
+      if ((node as { nodeType: string }).nodeType !== "StructDefinition") continue;
+      const structDoc = getDocText(
+        (node as { documentation?: { text: string } | string }).documentation,
+      );
+      if (!structDoc) continue;
 
-        const retypeMap = new Map<string, string>();
-        MEMBER_RETYPED_FROM_RE.lastIndex = 0;
-        let rt: RegExpExecArray | null;
-        while ((rt = MEMBER_RETYPED_FROM_RE.exec(structDoc)) !== null) {
-          retypeMap.set(rt[2]!, rt[1]!);
-        }
+      const renameMap = memberMap(MEMBER_RENAMED_FROM_RE, structDoc);
+      const retypeMap = memberMap(MEMBER_RETYPED_FROM_RE, structDoc);
 
-        const locationMatch = STORAGE_LOCATION_RE.exec(structDoc);
-        if (locationMatch) {
-          const storageLocation = locationMatch[1]!;
-          if (renameMap.size > 0) namespaceMemberRenameAnnotations.set(storageLocation, renameMap);
-          if (retypeMap.size > 0) namespaceMemberRetypeAnnotations.set(storageLocation, retypeMap);
+      const locationMatch = STORAGE_LOCATION_RE.exec(structDoc);
+      const key = locationMatch
+        ? locationMatch[1]!
+        : (node as { canonicalName?: string }).canonicalName;
+      if (!key) continue;
 
-          const unsafeAllowMatch = structDoc.match(
-            new RegExp(`@custom:${ANNOTATION_PREFIX}-unsafe-allow\\s+([^\\n@]+)`),
-          );
-          if (unsafeAllowMatch) {
-            const kinds = parseUnsafeAllowAnnotation(
-              unsafeAllowMatch[1],
-              `namespace "${storageLocation}" in contract ${simpleContractName}`,
-            );
-            if (kinds.length > 0) namespaceUnsafeAllow.set(storageLocation, kinds);
-          }
-        } else {
-          const canonicalName = (node as { canonicalName?: string }).canonicalName;
-          if (canonicalName) {
-            if (renameMap.size > 0) structMemberRenameAnnotations.set(canonicalName, renameMap);
-            if (retypeMap.size > 0) structMemberRetypeAnnotations.set(canonicalName, retypeMap);
-          }
-        }
-      }
+      const renames = locationMatch ? result.namespaceMemberRename : result.structMemberRename;
+      const retypes = locationMatch ? result.namespaceMemberRetype : result.structMemberRetype;
+      if (renameMap.size > 0) renames.set(key, renameMap);
+      if (retypeMap.size > 0) retypes.set(key, retypeMap);
     }
   }
 
-  return {
-    renameAnnotations,
-    retypeAnnotations,
-    perVariableUnsafeAllow,
-    namespaceUnsafeAllow,
-    namespaceMemberRenameAnnotations,
-    namespaceMemberRetypeAnnotations,
-    structMemberRenameAnnotations,
-    structMemberRetypeAnnotations,
-    unsafeAllowFromAnnotation,
-  };
+  return result;
 }
 
-export function embedAnnotations(
+export function embedStructMemberAnnotations(
   layout: StorageLayout,
-  renameAnnotations: Map<string, string>,
-  retypeAnnotations: Map<string, string>,
-  namespaceMemberRenameAnnotations: Map<string, Map<string, string>>,
-  namespaceMemberRetypeAnnotations: Map<string, Map<string, string>>,
-  structMemberRenameAnnotations: Map<string, Map<string, string>>,
-  structMemberRetypeAnnotations: Map<string, Map<string, string>>,
+  annotations: StructMemberAnnotations,
 ): StorageLayout {
-  // Regular storage items
-  for (const item of layout.storage) {
-    const oldLabel = renameAnnotations.get(item.label);
-    if (oldLabel !== undefined) item.renamedFrom = oldLabel;
-    const oldType = retypeAnnotations.get(item.label);
-    if (oldType !== undefined) item.retypedFrom = oldType;
-  }
-
-  // Namespace items
-  if (layout.namespaces) {
-    for (const [nsId, items] of Object.entries(layout.namespaces)) {
-      const renameMap = namespaceMemberRenameAnnotations.get(nsId);
-      const retypeMap = namespaceMemberRetypeAnnotations.get(nsId);
-      for (const item of items) {
-        const oldLabel = renameMap?.get(item.label);
-        if (oldLabel !== undefined) item.renamedFrom = oldLabel;
-        const oldType = retypeMap?.get(item.label);
-        if (oldType !== undefined) item.retypedFrom = oldType;
-      }
+  // Namespace members
+  for (const [nsId, items] of Object.entries(layout.namespaces ?? {})) {
+    const renameMap = annotations.namespaceMemberRename.get(nsId);
+    const retypeMap = annotations.namespaceMemberRetype.get(nsId);
+    for (const item of items) {
+      const oldLabel = renameMap?.get(item.label);
+      if (oldLabel !== undefined) item.renamedFrom = oldLabel;
+      const oldType = retypeMap?.get(item.label);
+      if (oldType !== undefined) item.retypedFrom = oldType;
     }
   }
 
@@ -206,19 +135,15 @@ export function embedAnnotations(
   for (const typeInfo of Object.values(layout.types ?? {})) {
     const members = (
       typeInfo as {
-        members?: Array<{
-          label: string;
-          renamedFrom?: string;
-          retypedFrom?: string;
-        }>;
+        members?: Array<{ label: string; renamedFrom?: string; retypedFrom?: string }>;
       }
     ).members;
     if (!members) continue;
     const typeLabel = (typeInfo as { label: string }).label;
     if (!typeLabel.startsWith("struct ")) continue;
     const canonicalName = typeLabel.slice("struct ".length);
-    const renameMap = structMemberRenameAnnotations.get(canonicalName);
-    const retypeMap = structMemberRetypeAnnotations.get(canonicalName);
+    const renameMap = annotations.structMemberRename.get(canonicalName);
+    const retypeMap = annotations.structMemberRetype.get(canonicalName);
     if (!renameMap && !retypeMap) continue;
     for (const member of members) {
       const oldLabel = renameMap?.get(member.label);

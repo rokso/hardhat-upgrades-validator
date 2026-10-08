@@ -1,21 +1,35 @@
 /**
  * Disk cache for oz-core ValidationData.
  *
- * Stores compiled validation results in `{cache}/hardhat-upgrades-validator/validations.json`
+ * Stores compiled validation results in
+ * `{cache}/hardhat-upgrades-validator/validations-<format>-oz<version>.json`
  * so that the deploy hook and CLI tasks can resolve storage layouts without
- * re-parsing build-info files after the compile step.
+ * re-parsing build-info files after the compile step. The name changes with
+ * this plugin's cache format and the upgrades-core version, so a cache written
+ * by an older release (or OZ) is never read: its absence forces a full build.
  *
  * File locking (proper-lockfile) is used on writes so parallel Hardhat workers
  * cannot corrupt the cache. Pattern adapted from @openzeppelin/hardhat-upgrades (MIT).
  */
 
-import { readFile, writeFile, mkdir, open } from "node:fs/promises";
+import { readFile, writeFile, mkdir, open, rm } from "node:fs/promises";
 import { join, dirname } from "node:path";
+import { createRequire } from "node:module";
 import { lock as lockfile } from "proper-lockfile";
 import { type ValidationDataCurrent, isCurrentValidationData } from "@openzeppelin/upgrades-core";
 
+// Bump when what the compile hook stores changes meaning.
+const CACHE_FORMAT = 2;
+const OZ_VERSION = (
+  createRequire(import.meta.url)("@openzeppelin/upgrades-core/package.json") as { version: string }
+).version;
+
 export function validationsCachePath(hardhatCachePath: string): string {
-  return join(hardhatCachePath, "hardhat-upgrades-validator", "validations.json");
+  return join(
+    hardhatCachePath,
+    "hardhat-upgrades-validator",
+    `validations-${CACHE_FORMAT}-oz${OZ_VERSION}.json`,
+  );
 }
 
 export async function loadValidationsFromDisk(
@@ -53,4 +67,21 @@ export async function writeValidationsToDisk(
   } finally {
     await releaseLock?.();
   }
+}
+
+/** Removes the cache, so the next build recompiles every contract into it. */
+export async function removeValidationsFromDisk(hardhatCachePath: string): Promise<void> {
+  await rm(validationsCachePath(hardhatCachePath), { force: true });
+}
+
+/**
+ * Why a compiled contract has no layout. Callers fail on it: a missing cache
+ * means no build has validated the current code, not that there is nothing
+ * to check.
+ */
+export function missingLayoutReason(validations: ValidationDataCurrent | undefined): string {
+  return validations === undefined
+    ? "the validation cache is missing: a build is running, or the last one failed, was " +
+        "interrupted or could not validate a contract. Run `hardhat compile` and check its warnings."
+    : "its storage layout is not in the validation cache. Run `hardhat compile --force` and check its warnings.";
 }

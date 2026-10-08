@@ -7,7 +7,7 @@ import {
 
 // ---------------------------------------------------------------------------
 // Mock oz-core on-chain helpers for detectProxyOnchain tests.
-// detectProxy / detectProxyFromBytecode do not use oz-core — spreading orig
+// detectProxy / detectProxyFromBytecode do not use oz-core; spreading orig
 // preserves all real functions, only isTransparentOrUUPSProxy and
 // isBeaconProxy are replaced with controllable fakes.
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ const EIP1967_BEACON_SLOT = "a3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb
 const EIP1967_BEACON_BYTECODE = "0x60806040" + EIP1967_BEACON_SLOT + "5460a01b";
 
 /**
- * Non-proxy contract — a simple counter with no delegation.
+ * Non-proxy contract; a simple counter with no delegation.
  * No known proxy slot or EIP-1167 prefix.
  */
 const PLAIN_CONTRACT_BYTECODE =
@@ -105,10 +105,10 @@ describe("detectProxyFromBytecode", () => {
 });
 
 // ---------------------------------------------------------------------------
-// detectProxy — deployment-record signal
+// detectProxy; deployment-record signal
 // ---------------------------------------------------------------------------
 
-describe("detectProxy — deployment-record signal", () => {
+describe("detectProxy: deployment-record signal", () => {
   it("returns isProxy=true when implementation field is present", () => {
     const result = detectProxy({
       implementation: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
@@ -137,10 +137,10 @@ describe("detectProxy — deployment-record signal", () => {
 });
 
 // ---------------------------------------------------------------------------
-// detectProxy — bytecode fallback
+// detectProxy; bytecode fallback
 // ---------------------------------------------------------------------------
 
-describe("detectProxy — bytecode fallback", () => {
+describe("detectProxy: bytecode fallback", () => {
   it("falls back to bytecode detection when no implementation field", () => {
     const result = detectProxy({ deployedBytecode: EIP1967_PROXY_BYTECODE });
     expect(result).toEqual({ isProxy: true, kind: "eip-1967" });
@@ -158,7 +158,7 @@ describe("detectProxy — bytecode fallback", () => {
 });
 
 // ---------------------------------------------------------------------------
-// detectProxyOnchain — on-chain EIP-1967 slot reads via oz-core helpers
+// detectProxyOnchain; on-chain EIP-1967 slot reads via oz-core helpers
 // ---------------------------------------------------------------------------
 
 const FAKE_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -189,11 +189,11 @@ describe("detectProxyOnchain", () => {
     expect(result).toEqual({ isProxy: false });
   });
 
-  it("returns isProxy=false when the provider throws (network error)", async () => {
+  it("returns unknown (not 'not a proxy') when the provider throws (network error)", async () => {
     vi.mocked(isTransparentOrUUPSProxy).mockRejectedValue(new Error("network unavailable"));
 
     const result = await detectProxyOnchain(fakeProvider, FAKE_ADDRESS);
-    expect(result).toEqual({ isProxy: false });
+    expect(result).toEqual({ isProxy: false, unknown: true });
   });
 
   it("does not call isBeaconProxy when isTransparentOrUUPSProxy already returns true", async () => {

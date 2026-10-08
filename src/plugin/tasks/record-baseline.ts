@@ -21,8 +21,10 @@ import {
   compareBytecode,
   resolveArtifactName,
   resolveDeploymentNetworks,
+  selectedNetwork,
+  ArtifactNotFoundError,
 } from "../internals/deployment-utils.js";
-import { loadValidationsFromDisk } from "../internals/validations-cache.js";
+import { loadValidationsFromDisk, missingLayoutReason } from "../internals/validations-cache.js";
 import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import { listDirOrEmpty, readJsonFile, writeJsonFile } from "../../utils/io.js";
 import { logger } from "../../utils/logger.js";
@@ -31,16 +33,15 @@ interface RecordBaselineArgs {
   contract?: string;
   all: boolean;
   force: boolean;
-  network?: string;
 }
 
 const action: NewTaskActionFunction<RecordBaselineArgs> = async (
-  { contract, all, force, network },
+  { contract, all, force },
   hre: HardhatRuntimeEnvironment,
 ) => {
   const projectRoot = hre.config.paths.root;
   const deploymentsBase = resolve(projectRoot, "deployments");
-  const targetNetworks = await resolveDeploymentNetworks(deploymentsBase, network);
+  const targetNetworks = await resolveDeploymentNetworks(deploymentsBase, selectedNetwork(hre));
   if (targetNetworks === null) return;
 
   if (!all && (contract === undefined || contract === "")) {
@@ -51,6 +52,7 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
 
   let totalRecorded = 0;
   let totalSkipped = 0;
+  let totalFailed = 0;
   const cache = createBuildInfoOutputCache();
   const validations = await loadValidationsFromDisk(hre.config.paths.cache);
 
@@ -67,13 +69,16 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
     for (const name of contractNames) {
       const result = await recordBaseline(name, deploymentsDir, hre, cache, validations, force);
       if (result === "recorded") totalRecorded++;
+      else if (result === "failed") totalFailed++;
       else totalSkipped++;
     }
   }
 
   logger.log(
-    `\n[INFO] Baseline recording complete: ${totalRecorded} recorded, ${totalSkipped} skipped.`,
+    `\n[INFO] Baseline recording complete: ${totalRecorded} recorded, ${totalSkipped} skipped` +
+      (totalFailed > 0 ? `, ${totalFailed} failed.` : "."),
   );
+  if (totalFailed > 0) process.exitCode = 1;
 };
 
 export default action;
@@ -85,15 +90,15 @@ async function recordBaseline(
   cache: ReturnType<typeof createBuildInfoOutputCache>,
   validations: ValidationDataCurrent | undefined,
   force: boolean,
-): Promise<"recorded" | "skipped"> {
+): Promise<"recorded" | "skipped" | "failed"> {
   const deployment = await readDeployment(deploymentsDir, name);
   if (deployment === null) {
-    logger.log(`  [SKIP] "${name}" — no deployment file found.`);
+    logger.log(`  [SKIP] "${name}": no deployment file found.`);
     return "skipped";
   }
 
   if (deployment.upgradeStorageLayout !== undefined && !force) {
-    logger.log(`  [SKIP] "${name}" — baseline already recorded. Use --force to overwrite.`);
+    logger.log(`  [SKIP] "${name}": baseline already recorded. Use --force to overwrite.`);
     return "skipped";
   }
 
@@ -107,18 +112,20 @@ async function recordBaseline(
       validations,
       cache,
     ));
-  } catch {
-    logger.log(`  [SKIP] "${name}" — artifact not found. Run \`hardhat build\` first.`);
-    return "skipped";
+  } catch (err) {
+    // Not compiled here (e.g. a prebuilt proxy artifact): nothing to record.
+    if (err instanceof ArtifactNotFoundError) {
+      logger.log(`  [SKIP] "${name}": artifact not found. Run \`hardhat build\` first.`);
+      return "skipped";
+    }
+    logger.log(`  [ERROR] "${name}": ${(err as Error).message}`);
+    return "failed";
   }
 
+  // A compiled contract with no layout is a failure, never "nothing to record".
   if (upgradeStorageLayout === undefined) {
-    const reason =
-      validations === undefined
-        ? `validation cache not found — run \`hardhat compile\` first.`
-        : `contract not in validation cache — run \`hardhat compile\` to refresh.`;
-    logger.log(`  [SKIP] "${name}" — ${reason}`);
-    return "skipped";
+    logger.log(`  [ERROR] "${name}": ${artifactName}: ${missingLayoutReason(validations)}`);
+    return "failed";
   }
 
   // Verify bytecode matches before trusting the local layout.
@@ -128,28 +135,28 @@ async function recordBaseline(
   if (deployedBytecode === undefined || deployedBytecode === "") {
     if (!force) {
       logger.log(
-        `  [SKIP] "${name}" — deployment file has no deployedBytecode, cannot verify code matches on-chain.\n` +
+        `  [SKIP] "${name}": deployment file has no deployedBytecode, cannot verify code matches on-chain.\n` +
           `         Use --force to record anyway (risky if code has been updated since last deploy).`,
       );
       return "skipped";
     }
-    logger.log(`  [WARN] "${name}" — skipping bytecode check (--force).`);
+    logger.log(`  [WARN] "${name}": skipping bytecode check (--force).`);
   } else {
     const cmp = compareBytecode(deployedBytecode, artifactBytecode);
     if (cmp.match === "none") {
       if (!force) {
         logger.log(
-          `  [WARN] "${name}" — compiled bytecode does not match deployed bytecode.\n` +
+          `  [WARN] "${name}": compiled bytecode does not match deployed bytecode.\n` +
             `         The local code has likely been updated since the last deploy.\n` +
             `         Check out the version that was deployed, then run record-baseline again.\n` +
             `         Use --force to record anyway (only if you are certain the layout is correct).`,
         );
         return "skipped";
       }
-      logger.log(`  [WARN] "${name}" — bytecode mismatch ignored (--force).`);
+      logger.log(`  [WARN] "${name}": bytecode mismatch ignored (--force).`);
     } else if (cmp.match === "metadata-only") {
       logger.log(
-        `  [INFO] "${name}" — bytecode matches (metadata-only diff, likely compiler settings).`,
+        `  [INFO] "${name}": bytecode matches (metadata-only diff, likely compiler settings).`,
       );
     }
   }
@@ -165,7 +172,7 @@ async function recordBaseline(
   });
 
   logger.log(
-    `  [OK]   "${name}" — baseline recorded (${upgradeStorageLayout.storage.length} variable(s)).`,
+    `  [OK]   "${name}": baseline recorded (${upgradeStorageLayout.storage.length} variable(s)).`,
   );
   return "recorded";
 }

@@ -1,5 +1,28 @@
-import { UNSAFE_ALLOW_KINDS } from "../../types/validation.js";
 import { logger } from "../../utils/logger.js";
+import type {
+  ProxyKind,
+  SafetyError,
+  StorageLayout,
+  UnsafeAllowKind,
+} from "../../types/validation.js";
+import {
+  type ValidationDataCurrent,
+  getErrors,
+  inferProxyKind,
+  getStorageLayout,
+  getUnlinkedBytecode,
+  getVersion,
+} from "@openzeppelin/upgrades-core";
+import { loadBuildInfo } from "./build-info-utils.js";
+import type { BuildInfoOutputCache } from "./build-info-utils.js";
+import {
+  extractStructMemberAnnotations,
+  embedStructMemberAnnotations,
+} from "./annotation-utils.js";
+
+export type { ProxyKind };
+export { createBuildInfoOutputCache } from "./build-info-utils.js";
+export type { BuildInfoOutputCache, BuildInfoParsed } from "./build-info-utils.js";
 
 /**
  * The subset of Hardhat's ArtifactManager that getContractBuildData uses.
@@ -10,26 +33,6 @@ export interface ArtifactsReader {
   getBuildInfoId(name: string): Promise<string | undefined>;
   getBuildInfoOutputPath(id: string): Promise<string | undefined>;
 }
-import type { UnsafeAllowKind, ContractSafetyError, ProxyKind } from "../../types/validation.js";
-export type { ProxyKind };
-import {
-  type StorageLayout,
-  type ValidationDataCurrent,
-  getErrors,
-  inferProxyKind,
-  getStorageLayout,
-  getUnlinkedBytecode,
-  getVersion,
-} from "@openzeppelin/upgrades-core";
-import { loadBuildInfo } from "./build-info-utils.js";
-import type { BuildInfoOutputCache, BuildInfoParsed } from "./build-info-utils.js";
-import {
-  extractAnnotationMaps as extractAnnotationMapsInternal,
-  embedAnnotations,
-} from "./annotation-utils.js";
-
-export { createBuildInfoOutputCache } from "./build-info-utils.js";
-export type { BuildInfoOutputCache, BuildInfoParsed } from "./build-info-utils.js";
 
 /**
  * Shared utilities for reading deployment files and resolving storage layouts
@@ -37,40 +40,14 @@ export type { BuildInfoOutputCache, BuildInfoParsed } from "./build-info-utils.j
  *
  * Layout resolution follows the same pattern as @openzeppelin/hardhat-upgrades:
  *   artifact.bytecode
- *     → getUnlinkedBytecode(validations, bytecode)
- *     → getVersion(unlinkedBytecode, bytecode)
- *     → getStorageLayout(validations, version)
+ *     -> getUnlinkedBytecode(validations, bytecode)
+ *     -> getVersion(unlinkedBytecode, bytecode)
+ *     -> getStorageLayout(validations, version)
  *
- * This avoids re-parsing build-info files for layout extraction — oz-core
- * already ran extractStorageLayout (including the namespaced pass) during
- * validate() in the compile hook and baked the result into ValidationData.
- *
- * We still read the build-info output for our own NatSpec annotations
- * (@custom:upgrades-validator-renamed-from, @custom:upgrades-validator-retyped-from,
- * @custom:upgrades-validator-unsafe-allow) since those are not part of OZ's data.
+ * oz-core already ran extractStorageLayout (including the namespaced pass and
+ * its `@custom:oz-*` tags) during validate() in the compile hook. Build-info is
+ * read only for our struct-member tags, which OZ does not extract.
  */
-
-const UNSAFE_ALLOW_KINDS_SET: ReadonlySet<string> = new Set(UNSAFE_ALLOW_KINDS);
-
-/**
- * Parses the raw value of a `@custom:upgrades-validator-unsafe-allow` devdoc
- * annotation into a validated `UnsafeAllowKind[]`.
- */
-export function parseUnsafeAllowAnnotation(raw: unknown, context?: string): UnsafeAllowKind[] {
-  if (typeof raw !== "string") return [];
-
-  const tokens = raw.split(/[\s,]+/).filter(Boolean);
-  const unknown = tokens.filter((t) => !UNSAFE_ALLOW_KINDS_SET.has(t));
-
-  if (unknown.length > 0 && context !== undefined) {
-    logger.warn(
-      `Unknown unsafe-allow token(s) "${unknown.join(", ")}" on ${context} — ignored.\n` +
-        `  Valid values: ${UNSAFE_ALLOW_KINDS.join(", ")}`,
-    );
-  }
-
-  return tokens.filter((t): t is UnsafeAllowKind => UNSAFE_ALLOW_KINDS_SET.has(t));
-}
 
 // Helper for splitting artifact names (local utility)
 function parseArtifactName(artifactName: string): {
@@ -91,7 +68,7 @@ function parseArtifactName(artifactName: string): {
 /**
  * Finds the build-info source key matching `artifactSource`.
  * If multiple keys end with the same suffix (ambiguous path prefix), picks the
- * first and warns — callers should use a fully-qualified artifact name to avoid
+ * first and warns. Callers should use a fully-qualified artifact name to avoid
  * this. Falls back to `artifactSource` itself when no key matches.
  */
 export function resolveWinnerSource(
@@ -105,88 +82,26 @@ export function resolveWinnerSource(
   if (matches.length > 1) {
     logger.warn(
       `Ambiguous source for contract "${contractName}": ` +
-        `multiple build-info sources match "${artifactSource}" — using "${matches[0]}". ` +
+        `multiple build-info sources match "${artifactSource}"; using "${matches[0]}". ` +
         `Use a fully-qualified artifact name (sourceName:contractName) to disambiguate.`,
     );
   }
   return matches[0] ?? artifactSource;
 }
 
-export function extractAnnotationMaps(
-  parsed: BuildInfoParsed,
-  simpleContractName: string,
-  winnerSource: string,
-): ReturnType<typeof extractAnnotationMapsInternal> {
-  return extractAnnotationMapsInternal(
-    parsed,
-    simpleContractName,
-    winnerSource,
-    parseUnsafeAllowAnnotation,
-  );
+/** The compiled artifact for a deployment does not exist (not compiled, or renamed/removed). */
+export class ArtifactNotFoundError extends Error {
+  constructor(artifactName: string, cause: unknown) {
+    super(`artifact ${artifactName} not found. Has the contract been compiled?`, { cause });
+    this.name = "ArtifactNotFoundError";
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Contract safety error kinds (from oz-core getErrors output)
-// ---------------------------------------------------------------------------
-
-const SUPPORTED_SAFETY_KINDS = new Set([
-  "constructor",
-  "delegatecall",
-  "selfdestruct",
-  "state-variable-immutable",
-  "state-variable-assignment",
-  "external-library-linking",
-]);
-
-function mapSafetyErrors(
-  ozErrors: Array<{
-    kind: string;
-    src: string;
-    name?: string;
-    contract?: string;
-  }>,
-): ContractSafetyError[] {
-  const result: ContractSafetyError[] = [];
-  for (const e of ozErrors) {
-    if (!SUPPORTED_SAFETY_KINDS.has(e.kind)) continue;
-    switch (e.kind) {
-      case "constructor":
-        result.push({
-          kind: "constructor",
-          contract: e.contract ?? "",
-          src: e.src,
-        });
-        break;
-      case "delegatecall":
-        result.push({ kind: "delegatecall", src: e.src });
-        break;
-      case "selfdestruct":
-        result.push({ kind: "selfdestruct", src: e.src });
-        break;
-      case "state-variable-immutable":
-        result.push({
-          kind: "state-variable-immutable",
-          name: e.name ?? "",
-          src: e.src,
-        });
-        break;
-      case "state-variable-assignment":
-        result.push({
-          kind: "state-variable-assignment",
-          name: e.name ?? "",
-          src: e.src,
-        });
-        break;
-      case "external-library-linking":
-        result.push({
-          kind: "external-library-linking",
-          name: e.name ?? "",
-          src: e.src,
-        });
-        break;
-    }
-  }
-  return result;
+export interface BuildDataOptions {
+  /** Proxy kind for OZ's safety rules. Inferred by OZ when not given. */
+  kind?: ProxyKind;
+  /** OZ error kinds to allow, passed to OZ's `getErrors`. */
+  unsafeAllow?: UnsafeAllowKind[];
 }
 
 // ---------------------------------------------------------------------------
@@ -194,133 +109,78 @@ function mapSafetyErrors(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves the OZ-format storage layout and annotations for a contract.
+ * Resolves the OZ-format storage layout and OZ's upgrade-safety errors for a
+ * contract.
  *
- * Layout comes from oz-core's ValidationData (computed during the compile
- * hook's validate() call), mirroring @openzeppelin/hardhat-upgrades:
- *   artifact.bytecode → getVersion → getStorageLayout(validations, version)
+ * Layout and errors come from oz-core's ValidationData (computed during the
+ * compile hook's validate() call), mirroring @openzeppelin/hardhat-upgrades:
+ *   artifact.bytecode -> getVersion -> getStorageLayout / getErrors
  *
- * Build-info output is read only for our NatSpec annotations
- * (@custom:upgrades-validator-*) which oz-core does not process.
+ * `upgradeStorageLayout` is undefined only when the contract is not in the
+ * ValidationData (first compile, or cache cleared).
  *
- * @throws if the artifact does not exist (callers should catch and skip).
+ * @throws ArtifactNotFoundError if the artifact does not exist. Any other
+ * error (including from OZ) propagates and must fail the caller.
  */
 export async function getContractBuildData(
   artifactName: string,
   artifacts: ArtifactsReader,
   validations: ValidationDataCurrent | undefined,
   cache: BuildInfoOutputCache,
-  proxyKind?: ProxyKind,
+  options: BuildDataOptions = {},
 ): Promise<{
   upgradeStorageLayout: StorageLayout | undefined;
-  unsafeAllowFromAnnotation: UnsafeAllowKind[];
-  perVariableUnsafeAllow: Map<string, UnsafeAllowKind[]>;
-  namespaceUnsafeAllow: Map<string, UnsafeAllowKind[]>;
-  safetyErrors: ContractSafetyError[];
+  safetyErrors: SafetyError[];
   proxyKind: ProxyKind | undefined;
 }> {
   const { qualifiedName, simpleContractName } = parseArtifactName(artifactName);
+  const missing = { upgradeStorageLayout: undefined, safetyErrors: [], proxyKind: undefined };
 
-  const empty = {
-    upgradeStorageLayout: undefined,
-    unsafeAllowFromAnnotation: [] as UnsafeAllowKind[],
-    perVariableUnsafeAllow: new Map<string, UnsafeAllowKind[]>(),
-    namespaceUnsafeAllow: new Map<string, UnsafeAllowKind[]>(),
-    safetyErrors: [] as ContractSafetyError[],
-    proxyKind: undefined as ProxyKind | undefined,
-  };
-
-  // readArtifact throws if the contract has not been compiled — let it propagate
-  // so callers can catch and show "[SKIP] artifact not found".
-  const artifact = await artifacts.readArtifact(qualifiedName);
-
-  // --- Layout + safety errors from ValidationData (oz-core style) ---
-  let upgradeStorageLayout: StorageLayout | undefined;
-  let safetyErrors: ContractSafetyError[] = [];
-  let resolvedKind: ProxyKind | undefined;
-
-  if (validations !== undefined) {
-    try {
-      const unlinkedBytecode = getUnlinkedBytecode(validations, artifact.bytecode);
-      const version = getVersion(unlinkedBytecode, artifact.bytecode);
-      upgradeStorageLayout = getStorageLayout(validations, version);
-
-      resolvedKind = proxyKind ?? (inferProxyKind(validations, version) as ProxyKind);
-      const ozErrors = getErrors(validations, version, {
-        kind: resolvedKind,
-        unsafeAllow: [],
-      });
-      safetyErrors = mapSafetyErrors(ozErrors as never);
-    } catch {
-      // Contract not yet in ValidationData (first compile, or cache cleared).
-      // Return empty so the caller can decide whether to skip.
-    }
+  let artifact: Awaited<ReturnType<ArtifactsReader["readArtifact"]>>;
+  try {
+    artifact = await artifacts.readArtifact(qualifiedName);
+  } catch (err) {
+    throw new ArtifactNotFoundError(qualifiedName, err);
   }
 
-  if (upgradeStorageLayout === undefined) {
-    return { ...empty, safetyErrors };
+  if (validations === undefined) return missing;
+
+  let version: ReturnType<typeof getVersion>;
+  let upgradeStorageLayout: StorageLayout;
+  try {
+    const unlinkedBytecode = getUnlinkedBytecode(validations, artifact.bytecode);
+    version = getVersion(unlinkedBytecode, artifact.bytecode);
+    upgradeStorageLayout = getStorageLayout(validations, version);
+  } catch {
+    // Contract not in ValidationData (first compile, or cache cleared).
+    return missing;
   }
 
-  // --- Our NatSpec annotations from build-info devdoc + AST ---
-  // Use artifact.sourceName directly (no need to search matchingSources).
-  const noAnnotations = () => ({
-    upgradeStorageLayout,
-    unsafeAllowFromAnnotation: [] as UnsafeAllowKind[],
-    perVariableUnsafeAllow: new Map<string, UnsafeAllowKind[]>(),
-    namespaceUnsafeAllow: new Map<string, UnsafeAllowKind[]>(),
-    safetyErrors,
-    proxyKind: resolvedKind,
+  // Outside the try above: a failure here must not turn into "no errors".
+  const proxyKind = options.kind ?? (inferProxyKind(validations, version) as ProxyKind);
+  const safetyErrors = getErrors(validations, version, {
+    kind: proxyKind,
+    unsafeAllow: options.unsafeAllow ?? [],
   });
 
+  // --- Our struct-member tags from build-info AST ---
   const buildInfoId = await artifacts.getBuildInfoId(qualifiedName);
-  if (!buildInfoId) return noAnnotations();
+  const parsed = buildInfoId ? await loadBuildInfo(buildInfoId, artifacts, cache) : null;
+  if (parsed) {
+    // The build-info output may have a different path prefix than artifact.sourceName
+    // (e.g. "project/contracts/Box.sol" vs "contracts/Box.sol"). Find the matching key.
+    const winnerSource = resolveWinnerSource(
+      Object.keys(parsed.contracts),
+      artifact.sourceName,
+      simpleContractName,
+    );
+    embedStructMemberAnnotations(
+      upgradeStorageLayout,
+      extractStructMemberAnnotations(parsed, simpleContractName, winnerSource),
+    );
+  }
 
-  const parsed = await loadBuildInfo(buildInfoId, artifacts, cache);
-  if (!parsed) return noAnnotations();
-
-  // The build-info output may have a different path prefix than artifact.sourceName
-  // (e.g. "project/contracts/Box.sol" vs "contracts/Box.sol"). Find the matching key.
-  const winnerSource = resolveWinnerSource(
-    Object.keys(parsed.contracts),
-    artifact.sourceName,
-    simpleContractName,
-  );
-
-  const {
-    renameAnnotations,
-    retypeAnnotations,
-    perVariableUnsafeAllow,
-    namespaceUnsafeAllow,
-    namespaceMemberRenameAnnotations,
-    namespaceMemberRetypeAnnotations,
-    structMemberRenameAnnotations,
-    structMemberRetypeAnnotations,
-    unsafeAllowFromAnnotation,
-  } = extractAnnotationMapsInternal(
-    parsed,
-    simpleContractName,
-    winnerSource,
-    parseUnsafeAllowAnnotation,
-  );
-
-  embedAnnotations(
-    upgradeStorageLayout,
-    renameAnnotations,
-    retypeAnnotations,
-    namespaceMemberRenameAnnotations,
-    namespaceMemberRetypeAnnotations,
-    structMemberRenameAnnotations,
-    structMemberRetypeAnnotations,
-  );
-
-  return {
-    upgradeStorageLayout,
-    unsafeAllowFromAnnotation,
-    perVariableUnsafeAllow,
-    namespaceUnsafeAllow,
-    safetyErrors,
-    proxyKind: resolvedKind,
-  };
+  return { upgradeStorageLayout, safetyErrors, proxyKind };
 }
 
 export {
@@ -334,6 +194,16 @@ export { stripBytecodeMetadata, compareBytecode } from "../../core/bytecode-util
 export type { BytecodeMatchResult } from "../../core/bytecode-utils.js";
 
 import { listSubdirsOrEmpty } from "../../utils/io.js";
+
+/**
+ * Hardhat's global `--network` option, trimmed; undefined when not passed.
+ * It is a global option, so it never reaches a task's own arguments, and
+ * Hardhat leaves it undefined at runtime when it is not passed.
+ */
+export function selectedNetwork(hre: { globalOptions: { network?: string } }): string | undefined {
+  const network = (hre.globalOptions.network as string | undefined)?.trim();
+  return network === undefined || network === "" ? undefined : network;
+}
 
 /**
  * Resolves the list of deployment network directories to operate on.

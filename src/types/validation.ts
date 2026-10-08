@@ -1,18 +1,21 @@
+import type { getErrors, getStorageUpgradeReport } from "@openzeppelin/upgrades-core";
+
 // Re-export OZ's StorageLayout as the canonical layout type used throughout
 // this package. Consumers who need the layout shape can import it from here.
 export type { StorageLayout } from "@openzeppelin/upgrades-core";
 
 // ---------------------------------------------------------------------------
-// Contract-level safety errors (constructor, delegatecall, etc.)
+// OZ types
+//
+// Validation is delegated to @openzeppelin/upgrades-core. Its error and report
+// types are not all exported by name, so they are derived from its functions.
 // ---------------------------------------------------------------------------
 
-export type ContractSafetyError =
-  | { kind: "constructor"; contract: string; src: string }
-  | { kind: "delegatecall"; src: string }
-  | { kind: "selfdestruct"; src: string }
-  | { kind: "state-variable-immutable"; name: string; src: string }
-  | { kind: "state-variable-assignment"; name: string; src: string }
-  | { kind: "external-library-linking"; name: string; src: string };
+/** An upgrade-safety error from OZ's `getErrors` (constructor, delegatecall, initializers, ...). */
+export type SafetyError = ReturnType<typeof getErrors>[number];
+
+/** OZ's storage layout comparison. `ok` is the verdict; `explain()` describes each problem. */
+export type StorageReport = ReturnType<typeof getStorageUpgradeReport>;
 
 // ---------------------------------------------------------------------------
 // Validation results
@@ -20,33 +23,16 @@ export type ContractSafetyError =
 
 export interface ValidationResult {
   ok: boolean;
-  errors: ValidationError[];
-  safetyErrors: ContractSafetyError[];
+  /**
+   * OZ's storage comparison against the baseline. Undefined when there is no
+   * baseline or the storage check was skipped.
+   */
+  storage?: StorageReport;
+  safetyErrors: SafetyError[];
   warnings: ValidationWarning[];
 }
 
-export type ValidationError =
-  | { kind: "variable-removed"; label: string; slot: string; type: string }
-  | {
-      kind: "variable-renamed";
-      oldLabel: string;
-      newLabel: string;
-      slot: string;
-    }
-  | {
-      kind: "type-changed";
-      label: string;
-      slot: string;
-      oldType: string;
-      newType: string;
-    }
-  | { kind: "variable-inserted"; label: string; slot: string }
-  | { kind: "invalid-gap"; label: string; slot: string }
-  | { kind: "namespace-removed"; namespaceId: string }
-  | { kind: "namespace-collision"; namespaceId: string };
-
 export type ValidationWarning =
-  | { kind: "gap-shrunken"; label: string; oldSize: number; newSize: number }
   | { kind: "no-baseline"; contractName: string }
   | { kind: "storage-check-skipped"; contractName: string };
 
@@ -55,29 +41,17 @@ export type ValidationWarning =
 // ---------------------------------------------------------------------------
 
 export interface ValidateOptions {
-  /**
-   * Global unsafe-allow escape hatches.
-   */
+  /** OZ error kinds to allow (same values as OZ's `unsafeAllow`). */
   unsafeAllow?: UnsafeAllowKind[];
-  /**
-   * Per-variable unsafe-allow overrides from
-   * `@custom:upgrades-validator-unsafe-allow` NatSpec on individual state
-   * variables. Map of `label -> UnsafeAllowKind[]`.
-   */
-  perVariableUnsafeAllow?: Map<string, UnsafeAllowKind[]>;
-  /**
-   * Per-namespace unsafe-allow overrides from
-   * `@custom:upgrades-validator-unsafe-allow` NatSpec on namespace structs.
-   * Map of `namespaceId -> UnsafeAllowKind[]`.
-   */
-  namespaceUnsafeAllow?: Map<string, UnsafeAllowKind[]>;
+  /** Allow renamed variables without `@custom:oz-renamed-from` (OZ's `unsafeAllowRenames`). */
+  unsafeAllowRenames?: boolean;
   /**
    * Skip all storage layout validation for this upgrade.
    * For emergency use only.
    */
   unsafeSkipStorageCheck?: boolean;
   /**
-   * Proxy kind to use for storage layout validation rules.
+   * Proxy kind to use for validation rules.
    * Defaults to "transparent" when not provided.
    */
   kind?: ProxyKind;
@@ -89,21 +63,31 @@ export interface ValidateOptions {
 
 export type ProxyKind = "transparent" | "uups" | "beacon";
 
+export const PROXY_KINDS: readonly ProxyKind[] = ["transparent", "uups", "beacon"];
+
 // ---------------------------------------------------------------------------
-// Unsafe-allow escape hatch
+// Unsafe-allow escape hatch: OZ's error kinds
 // ---------------------------------------------------------------------------
 
-export const UNSAFE_ALLOW_KINDS = [
-  // Storage layout kinds
-  "variable-renamed",
-  "type-changed",
-  // Contract-level safety kinds
+export type UnsafeAllowKind = SafetyError["kind"];
+
+/**
+ * OZ's error kinds (`errorKinds` in upgrades-core, not exported from its
+ * index). A test keeps this list in sync with the installed version.
+ */
+export const UNSAFE_ALLOW_KINDS: readonly UnsafeAllowKind[] = [
+  "state-variable-assignment",
+  "state-variable-immutable",
+  "external-library-linking",
+  "struct-definition",
+  "enum-definition",
   "constructor",
   "delegatecall",
   "selfdestruct",
-  "state-variable-immutable",
-  "state-variable-assignment",
-  "external-library-linking",
-] as const;
-
-export type UnsafeAllowKind = (typeof UNSAFE_ALLOW_KINDS)[number];
+  "missing-public-upgradeto",
+  "internal-function-storage",
+  "missing-initializer",
+  "missing-initializer-call",
+  "duplicate-initializer-call",
+  "incorrect-initializer-order",
+];

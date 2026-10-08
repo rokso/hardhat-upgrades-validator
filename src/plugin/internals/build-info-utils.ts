@@ -1,30 +1,11 @@
 // src/plugin/build-info-utils.ts
-// Utilities for loading and caching build-info output (devdoc + AST only)
+// Utilities for loading and caching build-info output (AST only)
 
 import { readJsonFile } from "../../utils/io.js";
 import type { ArtifactsReader } from "./deployment-utils.js";
 
-// Types for build-info output
-export type BuildInfoContracts = Record<
-  string,
-  Record<
-    string,
-    {
-      devdoc?: {
-        "custom:upgrades-validator-unsafe-allow"?: string;
-        methods?: Record<string, { "custom:upgrades-validator-unsafe-allow"?: string }>;
-        stateVariables?: Record<
-          string,
-          {
-            "custom:upgrades-validator-renamed-from"?: string;
-            "custom:upgrades-validator-retyped-from"?: string;
-            "custom:upgrades-validator-unsafe-allow"?: string;
-          }
-        >;
-      };
-    }
-  >
->;
+// Types for build-info output. Only source ASTs are read (struct NatSpec).
+export type BuildInfoContracts = Record<string, Record<string, unknown>>;
 
 export type BuildInfoSources = Record<string, { ast?: unknown }>;
 

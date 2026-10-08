@@ -6,7 +6,7 @@ type RecursivePartial<T> = { [k in keyof T]?: RecursivePartial<T[k]> };
 type MaybeSolcOutput = RecursivePartial<SolcOutput>;
 
 /**
- * Returns true only when the solc output is a full compilation result — i.e.
+ * Returns true only when the solc output is a full compilation result: i.e.
  * it contains compiled contracts with bytecode and sources with ASTs.
  *
  * Hardhat may return a partial/cached output for unchanged files. Passing such

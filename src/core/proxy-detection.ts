@@ -1,17 +1,17 @@
 /**
- * Proxy detection — offline heuristics and on-chain EIP-1967 slot reads.
+ * Proxy detection: offline heuristics and on-chain EIP-1967 slot reads.
  *
  * The compile hook and CLI task only compare storage layouts for contracts
- * that are actually proxies — running the validation on a non-upgradeable
+ * that are actually proxies; running the validation on a non-upgradeable
  * contract would produce false positives.
  *
  * **Offline signals** (used by `detectProxy`, no network needed):
  *
- * 1. `implementation` field — hardhat-deploy / rocketh writes this into the
+ * 1. `implementation` field: hardhat-deploy / rocketh writes this into the
  *    deployment JSON whenever a proxy is deployed. Strongest signal.
- * 2. EIP-1967 slot hash in bytecode — the implementation or beacon slot hash
+ * 2. EIP-1967 slot hash in bytecode: the implementation or beacon slot hash
  *    appears verbatim in proxy bytecode.
- * 3. EIP-1167 minimal proxy prefix — clones have a fixed bytecode prefix.
+ * 3. EIP-1167 minimal proxy prefix: clones have a fixed bytecode prefix.
  *
  * **On-chain signal** (used by `detectProxyOnchain`, requires a provider):
  *
@@ -22,7 +22,7 @@
  *
  * **Why offline is preferred for the primary tools:**
  * `assertProxyUpgrade` / `validateProxyUpgrade` are called explicitly in
- * deploy scripts — the caller already knows it's a proxy. The `implementation`
+ * deploy scripts; the caller already knows it's a proxy. The `implementation`
  * field written by hardhat-deploy is authoritative. On-chain reads are a
  * fallback for edge cases (hand-crafted deployment files, custom proxies).
  */
@@ -66,6 +66,8 @@ export type ProxyKind =
 
 export interface ProxyDetectionResult {
   isProxy: boolean;
+  /** True when the chain could not be read: `isProxy: false` then means "unknown". */
+  unknown?: boolean;
   /** Present when `isProxy` is true. */
   kind?: ProxyKind;
 }
@@ -78,7 +80,7 @@ export interface ProxyDetectionResult {
  * Detects whether a contract is a proxy using any available signal.
  *
  * Pass in the fields from your deployment record. Any subset of fields can be
- * provided — the function applies whichever checks are possible given what
+ * provided; the function applies whichever checks are possible given what
  * is available.
  *
  * @param deployment.implementation - The address of the implementation
@@ -174,7 +176,7 @@ export async function detectProxyOnchain(
     }
     return { isProxy: false };
   } catch {
-    // Network unavailable, wrong network, or RPC error — degrade gracefully.
-    return { isProxy: false };
+    // Network unavailable, wrong network, or RPC error: we do not know.
+    return { isProxy: false, unknown: true };
   }
 }

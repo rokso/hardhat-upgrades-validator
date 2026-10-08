@@ -16,19 +16,22 @@ contract V2 {
         bool active;
     }
 
+    /**
+     * @custom:upgrades-validator-renamed-from y height
+     * @custom:upgrades-validator-retyped-from uint256 x
+     */
+    struct Position {
+        bytes32 x;
+        uint256 height;
+    }
+
     uint256 public version;
 
-    /// @custom:upgrades-validator-renamed-from legacyData
+    /// @custom:oz-renamed-from legacyData
     uint256 public data;
 
-    /// @custom:upgrades-validator-retyped-from uint256
+    /// @custom:oz-retyped-from uint256
     bytes32 public rawConfig;
 
-    /// @custom:upgrades-validator-unsafe-allow variable-renamed
-    uint256 public unsafeRenameTarget;
-
-    uint256 public unsafeRenameTarget2;
-
-    /// @custom:upgrades-validator-unsafe-allow type-changed
-    uint128 public unsafeTypeSource; // note: this is unsafe type change from uint256
+    Position public position;
 }
