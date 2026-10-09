@@ -150,6 +150,7 @@ export async function getContractBuildData(
   try {
     const unlinkedBytecode = getUnlinkedBytecode(validations, artifact.bytecode);
     version = getVersion(unlinkedBytecode, artifact.bytecode);
+    validations = targeting(validations, version, artifact.sourceName, simpleContractName);
     upgradeStorageLayout = getStorageLayout(validations, version);
   } catch {
     // Contract not in ValidationData (first compile, or cache cleared).
@@ -181,6 +182,36 @@ export async function getContractBuildData(
   }
 
   return { upgradeStorageLayout, safetyErrors, proxyKind };
+}
+
+/**
+ * OZ looks a contract up by its bytecode version and takes the first match, so
+ * two contracts that compile to identical code (possible with
+ * `bytecodeHash: "none"`) could swap layouts, safety errors and proxy kind.
+ * Moving the artifact's own entry to the front makes every lookup land on it.
+ */
+function targeting(
+  validations: ValidationDataCurrent,
+  version: ReturnType<typeof getVersion>,
+  sourceName: string,
+  contractName: string,
+): ValidationDataCurrent {
+  const own = `${sourceName}:${contractName}`;
+  for (const [i, run] of validations.log.entries()) {
+    // Build-info source names may carry a prefix (`project/contracts/...`).
+    const key = Object.keys(run).find(
+      (k) =>
+        (k === own || k.endsWith(`/${own}`)) &&
+        run[k].version?.withMetadata === version.withMetadata,
+    );
+    if (key !== undefined) {
+      return {
+        ...validations,
+        log: [{ [key]: run[key], ...run }, ...validations.log.filter((_, j) => j !== i)],
+      };
+    }
+  }
+  return validations;
 }
 
 export { readDeployment, readDeployments, resolveArtifactName } from "./deployment-files.js";
