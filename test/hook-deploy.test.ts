@@ -230,6 +230,24 @@ describe("fresh proxy deployment", () => {
     expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
     expect(await readIndex(deploymentsDir, PROXY)).toMatchObject({ implementation: IMPL });
   });
+
+  it("says why it records nothing for a build without a metadata hash", async () => {
+    const tail = "a164736f6c6343000818000a";
+    const state = chainState(IMPL);
+    state.code![IMPL] = "0x6080604052" + "ab".repeat(32) + "fe" + tail;
+    const hre = makeHre(makeMockChain(state));
+    hre.artifacts.readArtifact.mockResolvedValue({
+      ...logicArtifact,
+      deployedBytecode: "0x6080604052" + "00".repeat(32) + "fe" + tail,
+    });
+
+    await deployOverride({}, hre as never, deploying(proxyFiles(IMPL)));
+
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+    expect(vi.mocked(console.warn).mock.calls.flat().join("\n")).toMatch(
+      /Did not record MyContract.*embeds no metadata hash/,
+    );
+  });
 });
 
 describe("upgrades", () => {
