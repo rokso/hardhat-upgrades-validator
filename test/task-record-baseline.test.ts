@@ -495,6 +495,14 @@ describe("existing record", () => {
 // Chain availability
 // ---------------------------------------------------------------------------
 
+describe("arguments", () => {
+  it("asks for --contract or --all when given neither", async () => {
+    await expect(
+      recordBaselineAction({ ...baseArgs, contract: undefined }, makeHre(undefined) as never),
+    ).rejects.toThrow(/Provide --contract <name> to record a single contract, or --all/);
+  });
+});
+
 describe("chain availability", () => {
   it("fails (exit code 1) when the RPC cannot be reached: nothing can be recorded", async () => {
     await recordBaselineAction(baseArgs, makeHre(makeDeadChain()) as never);
