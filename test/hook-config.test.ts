@@ -2,9 +2,12 @@
  * The config hook asks every compiler for the solc outputs validation needs,
  * adding to whatever the user configured rather than replacing it.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { SolidityConfig } from "hardhat/types/config";
-import { requestValidationOutputs } from "../src/plugin/hooks/config.js";
+import configHooks, {
+  requestValidationOutputs,
+  resolveUpgradesValidatorConfig,
+} from "../src/plugin/hooks/config.js";
 
 const shared = { "*": { "*": ["abi"], "": ["ast"] } };
 
@@ -83,5 +86,70 @@ describe("requestValidationOutputs", () => {
     expect(selectionOf(solidity.profiles.default.compilers[0])["*"]["*"]).toEqual([
       "storageLayout",
     ]);
+  });
+});
+
+describe("resolveUpgradesValidatorConfig", () => {
+  it("resolves a configVariable API key and keeps string keys as written", () => {
+    const resolved = { _type: "ResolvedConfigurationVariable" };
+    const resolve = vi.fn().mockReturnValue(resolved);
+    const variable = { _type: "ConfigurationVariable", name: "KEY" } as const;
+
+    const config = resolveUpgradesValidatorConfig(
+      {
+        networks: ["mainnet"],
+        explorers: { mainnet: { apiKey: variable }, l2: { apiKey: "", apiUrl: "https://x" } },
+      } as never,
+      resolve as never,
+    );
+
+    expect(resolve).toHaveBeenCalledWith(variable);
+    expect(config.explorers).toEqual({
+      mainnet: { apiKey: resolved },
+      l2: { apiKey: "", apiUrl: "https://x" },
+    });
+    expect(config.networks).toEqual(["mainnet"]);
+  });
+
+  it("skips an explorer entry a JS config left undefined", () => {
+    const config = resolveUpgradesValidatorConfig(
+      { explorers: { mainnet: undefined, l2: { apiKey: "K" } } } as never,
+      vi.fn() as never,
+    );
+    expect(config.explorers).toEqual({ l2: { apiKey: "K" } });
+  });
+});
+
+describe("resolveUserConfig hook", () => {
+  const run = async (userConfig: object) => {
+    const { resolveUserConfig } = await configHooks();
+    const resolve = vi.fn().mockReturnValue("resolved");
+    const next = vi.fn().mockResolvedValue({ solidity: config() });
+    return (await resolveUserConfig!(userConfig as never, resolve as never, next)) as unknown as {
+      solidity: SolidityConfig;
+      upgradesValidator?: unknown;
+    };
+  };
+
+  it("carries upgradesValidator into the resolved config and requests the outputs", async () => {
+    const variable = { _type: "ConfigurationVariable", name: "KEY" };
+    const resolved = await run({
+      upgradesValidator: { networks: ["mainnet"], explorers: { mainnet: { apiKey: variable } } },
+    });
+
+    expect(resolved.upgradesValidator).toEqual({
+      networks: ["mainnet"],
+      explorers: { mainnet: { apiKey: "resolved" } },
+    });
+    const compiler = resolved.solidity.profiles.default.compilers[0];
+    expect(selectionOf(compiler)["*"]["*"]).toContain("storageLayout");
+  });
+
+  it("requests the outputs without an upgradesValidator section", async () => {
+    const resolved = await run({});
+
+    expect(resolved.upgradesValidator).toBeUndefined();
+    const compiler = resolved.solidity.profiles.default.compilers[0];
+    expect(selectionOf(compiler)["*"][""]).toContain("ast");
   });
 });

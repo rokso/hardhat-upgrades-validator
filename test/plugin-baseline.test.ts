@@ -327,6 +327,15 @@ describe("explorerConfig", () => {
       ).toEqual({ apiUrl: "https://blockscout.example/api" });
     }));
 
+  it.each([
+    ["an apiUrl that is not a URL", "api.etherscan.io/v2/api"],
+    ["a host that only starts like Etherscan's", "https://api.etherscan.io.example/v2/api"],
+  ])("does not send ETHERSCAN_API_KEY to %s", (_, apiUrl) =>
+    withEnvKey(async () => {
+      expect(await explorerConfig({ explorers: { l2: { apiUrl } } }, "l2")).toEqual({ apiUrl });
+    }),
+  );
+
   it("uses a key configured for the third-party explorer", () =>
     withEnvKey(async () => {
       expect(

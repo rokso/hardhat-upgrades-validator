@@ -27,7 +27,7 @@ import validateUpgradeAction from "../src/plugin/tasks/validate-upgrade.js";
 import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
 import { readProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
 import { codeSha256 } from "./helpers/code-hash.js";
-import { makeMockChain } from "./helpers/mock-chain.js";
+import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 
 const PROXY = "0x00000000000000000000000000000000000000aa";
 const IMPL = "0x00000000000000000000000000000000000000bb";
@@ -157,6 +157,21 @@ describe("validate-upgrade --all", () => {
 
     expect(validated()).toEqual(["src/Box.sol:Box"]);
     expect(logs.join("\n")).toMatch(/as of block 100/);
+  });
+
+  it("an unreachable RPC falls back to the index and says so", async () => {
+    await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
+    vi.mocked(getContractBuildData).mockClear();
+    logs = [];
+
+    await validateUpgradeAction(args({ all: true }), makeHre(makeDeadChain()) as never);
+
+    expect(validated()).toEqual(["src/Box.sol:Box"]);
+    const out = logs.join("\n");
+    expect(out).toMatch(/as of block 100/);
+    expect(out).toMatch(/Could not read a chain baseline for "Box", fell back to an offline one/);
+    // Passes on the offline index: nothing yet makes CI insist on the chain.
+    expect(process.exitCode).toBeUndefined();
   });
 
   it("offline: fails an indexed proxy whose implementation has no record, instead of skipping it", async () => {
