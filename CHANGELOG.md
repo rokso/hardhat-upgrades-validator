@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.1.0-alpha.3)
+## 0.1.0-alpha.3 (2026-10-13)
 
 The baseline is now what each proxy runs on chain.
 
