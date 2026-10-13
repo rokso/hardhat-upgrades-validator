@@ -331,6 +331,12 @@ function makeRecorder(
           `Did not record ${label} (${address}): the local build matches the chain only after ` +
             `stripping metadata, which does not prove its storage layout.`,
         );
+      } else if (bytecodeMatch === "code-only") {
+        logger.warn(
+          `Did not record ${label} (${address}): the build embeds no metadata hash ` +
+            `(bytecodeHash: "none" or appendCBOR: false), so matching code does not prove its ` +
+            `storage layout.`,
+        );
       }
       return record !== undefined;
     } catch (e) {

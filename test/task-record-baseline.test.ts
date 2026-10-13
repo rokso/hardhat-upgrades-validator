@@ -231,6 +231,29 @@ describe("local build", () => {
     expect(logs.join("\n")).toMatch(/does not prove its storage layout/);
   });
 
+  it("does not record a build without a metadata hash, and does not point at --from-chain", async () => {
+    // bytecodeHash: "none": the CBOR tail carries only the compiler version.
+    const tail = "a164736f6c6343000818000a";
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: "0x6080604052" + "ab".repeat(32) + "fe" + tail },
+      implementations: { [PROXY]: IMPL },
+    });
+    const hre = makeHre(chain);
+    hre.artifacts.readArtifact.mockResolvedValue({
+      contractName: "MyContract",
+      sourceName: "contracts/MyContract.sol",
+      deployedBytecode: "0x6080604052" + "00".repeat(32) + "fe" + tail,
+      immutableReferences: IMMUTABLES,
+    });
+
+    await recordBaselineAction(baseArgs, hre as never);
+
+    expect(await readRecord(IMPL)).toBeUndefined();
+    const out = logs.join("\n");
+    expect(out).toMatch(/embeds no metadata hash/);
+    expect(out).not.toMatch(/moved on|--from-chain/);
+  });
+
   it("--force does not bypass the bytecode proof", async () => {
     const other = "0x6080604052" + "ab".repeat(32) + "ff";
     const chain = makeMockChain({

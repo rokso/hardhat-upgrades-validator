@@ -290,6 +290,15 @@ async function recordBaseline(
     deployedBytecode: artifact.deployedBytecode,
     immutableReferences: artifact.immutableReferences,
   });
+  if (record === undefined && bytecodeMatch === "code-only") {
+    // Verified source has the same settings, so --from-chain cannot help.
+    logger.log(
+      `  [WARN] "${name}": the local build matches the code ${implementation} runs, but it ` +
+        `embeds no metadata hash (bytecodeHash: "none" or appendCBOR: false), so matching code ` +
+        `does not prove its storage layout. Builds without the hash cannot be recorded.`,
+    );
+    return "skipped";
+  }
   if (record === undefined) {
     const why =
       bytecodeMatch === "metadata-only"

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A build without a metadata hash (`bytecodeHash: "none"` or `appendCBOR: false`) now says that is why its layout is not recorded. `record-baseline` said the source had moved on and pointed at `--from-chain`, which refuses such builds too, and the deploy hook said nothing.
+
 ## 0.1.0-alpha.3 (2026-10-13)
 
 The baseline is now what each proxy runs on chain.
