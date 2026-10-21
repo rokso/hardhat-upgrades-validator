@@ -21,8 +21,8 @@ importers:
         specifier: ^4.1.2
         version: 4.1.2
       slotdiff:
-        specifier: ^0.1.0-alpha.1
-        version: 0.1.0-alpha.1
+        specifier: ^0.3.1
+        version: 0.3.1
       solidity-ast:
         specifier: ^0.4.62
         version: 0.4.62
@@ -1383,9 +1383,10 @@ packages:
   signal-exit@3.0.7:
     resolution: {integrity: sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ==}
 
-  slotdiff@0.1.0-alpha.1:
-    resolution: {integrity: sha512-1YqcmTGzZVd74wLK6uWy/9X+iTbzRXXKl0sAC10uAPRqgpkuTd2jWXTNrXxu7aXkeQuktH+VEpBDrHqrZXN0FA==}
-    engines: {node: '>=22.12.0'}
+  slotdiff@0.3.1:
+    resolution: {integrity: sha512-akSzpx5iT8BBW4mTBKIoLajud9D1In5hKH4jj8fFeBeZdnIOhmTBgwj/d6lX0IxKLOjoGYvHCOzwEB6J0pHNuw==}
+    engines: {node: '>=22.13.0'}
+    hasBin: true
 
   solidity-ast@0.4.62:
     resolution: {integrity: sha512-jSC7msQCkJXIzM8LlDjRZ5cif5w40g6THlXHFk3zchbL5dm3YLoBETvqPGo5KndYkftjhcs5kz1fnTu4d34lVQ==}
@@ -2893,7 +2894,7 @@ snapshots:
 
   signal-exit@3.0.7: {}
 
-  slotdiff@0.1.0-alpha.1:
+  slotdiff@0.3.1:
     dependencies:
       '@openzeppelin/upgrades-core': 1.46.0
     transitivePeerDependencies:

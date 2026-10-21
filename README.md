@@ -8,7 +8,7 @@ Powered by [@openzeppelin/upgrades-core](https://github.com/OpenZeppelin/openzep
 
 - Hardhat **v3.6** or later
 - hardhat-deploy **v2** (optional; the proxy helper works with any deploy tool)
-- Node.js **22** or later
+- Node.js **22.13** or later
 
 ## Installation
 

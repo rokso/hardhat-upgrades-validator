@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import type { SolcInput } from "@openzeppelin/upgrades-core";
 
 import { resolveChainBaseline, type ChainBaseline } from "../src/core/onchain/baseline.js";
-import { fetchVerifiedSource, getSolc, layoutFromSource, type ExplorerConfig } from "slotdiff";
+import { analyzeSource, fetchVerifiedSource, getSolc, type ExplorerConfig } from "slotdiff";
 import { readChainId } from "../src/core/onchain/implementation.js";
 import { validateStorageUpgrade } from "../src/core/validator.js";
 
@@ -98,7 +98,7 @@ describe.skipIf(!RPC || !PROXY || !(EXPLORER.apiKey || EXPLORER.apiUrl))(
 
     async function check(changed: SolcInput) {
       const solc = await getSolc(baseline.record.compiler!);
-      const layout = await layoutFromSource(changed, solc, baseline.record.contract);
+      const { layout } = await analyzeSource(changed, solc, baseline.record.contract);
       return validateStorageUpgrade("live", baseline.record.layout, layout, { kind: "uups" });
     }
 

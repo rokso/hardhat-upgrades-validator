@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- Depends on slotdiff 0.3.1 (was 0.1.0-alpha.1), which brings its fixes to rebuilding layouts from verified source (`record-baseline --from-chain`, and validation with an explorer configured): explorer errors no longer quote the request URL, which could carry the API key; solc runs in an empty directory, so verified source cannot import a file from yours; control characters in explorer and compiler text are stripped; and storage at a fixed slot outside the contract's ERC-7201 namespaces is refused instead of passing unchecked.
+- Requires Node.js 22.13 or later (was 22), as slotdiff does.
+
 ### Fixed
 
 - A build without a metadata hash (`bytecodeHash: "none"` or `appendCBOR: false`) now says that is why its layout is not recorded. `record-baseline` said the source had moved on and pointed at `--from-chain`, which refuses such builds too, and the deploy hook said nothing.

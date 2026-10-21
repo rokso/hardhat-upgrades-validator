@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import type { SolcInput } from "@openzeppelin/upgrades-core";
 
 import { resolveChainBaseline } from "../src/core/onchain/baseline.js";
-import { getSolc, layoutFromSource, type SolcRunner } from "slotdiff";
+import { analyzeSource, getSolc, type SolcRunner } from "slotdiff";
 import { LayoutIntegrityError } from "../src/core/onchain/errors.js";
 import { validateStorageUpgrade } from "../src/core/validator.js";
 import { makeMockChain } from "./helpers/mock-chain.js";
@@ -112,7 +112,7 @@ function explorerServing(served: string | SolcInput) {
 
 // The "new" side: the same extraction pipeline, applied to the local source.
 async function localLayout(content: string) {
-  return layoutFromSource(input(content), solc, "contracts/Box.sol:Box");
+  return (await analyzeSource(input(content), solc, "contracts/Box.sol:Box")).layout;
 }
 
 beforeAll(async () => {
