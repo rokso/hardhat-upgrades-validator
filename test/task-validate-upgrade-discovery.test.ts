@@ -9,22 +9,14 @@ import { join } from "node:path";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
-  return {
-    ...orig,
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
-  };
-});
-
-vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: vi.fn(),
 }));
 
 import validateUpgradeAction from "../src/plugin/tasks/validate-upgrade.js";
-import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import { createBuildAnalyzer } from "../src/plugin/internals/build-analysis.js";
+import { fakeAnalysis } from "./helpers/analysis.js";
 import { readProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
 import { codeSha256 } from "./helpers/code-hash.js";
 import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
@@ -97,8 +89,9 @@ const args = (over: Record<string, unknown>) => ({
   ...over,
 });
 
-const validated = () =>
-  vi.mocked(getContractBuildData).mock.calls.map(([artifactName]) => artifactName);
+const analyze = vi.fn();
+
+const validated = () => analyze.mock.calls.map(([artifactName]) => artifactName);
 
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vudisc-"));
@@ -119,11 +112,8 @@ beforeEach(async () => {
     layout: layout as never,
   });
   vi.clearAllMocks();
-  vi.mocked(getContractBuildData).mockResolvedValue({
-    upgradeStorageLayout: layout,
-    safetyErrors: [],
-    proxyKind: undefined,
-  } as never);
+  vi.mocked(createBuildAnalyzer).mockReturnValue(analyze);
+  analyze.mockResolvedValue(fakeAnalysis(layout as never));
   logs = [];
   vi.spyOn(console, "log").mockImplementation((m: string) => void logs.push(String(m)));
 });
@@ -150,7 +140,7 @@ describe("validate-upgrade --all", () => {
 
   it("offline: validates what the index lists, against the indexed implementation's record", async () => {
     await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
-    vi.mocked(getContractBuildData).mockClear();
+    analyze.mockClear();
     logs = [];
 
     await validateUpgradeAction(args({ all: true }), makeHre(undefined) as never);
@@ -161,7 +151,7 @@ describe("validate-upgrade --all", () => {
 
   it("an unreachable RPC falls back to the index and says so", async () => {
     await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
-    vi.mocked(getContractBuildData).mockClear();
+    analyze.mockClear();
     logs = [];
 
     await validateUpgradeAction(args({ all: true }), makeHre(makeDeadChain()) as never);
@@ -218,17 +208,15 @@ describe("validate-upgrade --all discovery errors", () => {
 });
 
 describe("validate-upgrade without the new layout", () => {
-  it("fails a proxy whose new layout is missing, instead of skipping it", async () => {
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      upgradeStorageLayout: undefined,
-      safetyErrors: [],
-      proxyKind: undefined,
-    } as never);
+  it("fails a proxy whose new code cannot be analyzed, instead of skipping it", async () => {
+    analyze.mockRejectedValue(
+      new Error("build info x lacks output: run `hardhat compile --force`."),
+    );
 
     await validateUpgradeAction(args({ all: true }), makeHre(chain()) as never);
 
     expect(logs.join("\n")).toMatch(
-      /\[ERROR\] "mainnet\/Box": src\/Box.sol:Box: the validation cache is missing.*hardhat compile/,
+      /\[ERROR\] "mainnet\/Box": build info x lacks output: run `hardhat compile --force`/,
     );
     expect(process.exitCode).toBe(1);
   });
@@ -296,7 +284,7 @@ describe("validate-upgrade messages", () => {
       JSON.stringify({ ...files.Box_Proxy, upgradeStorageLayout: layout }),
       "utf8",
     );
-    vi.mocked(getContractBuildData).mockClear();
+    analyze.mockClear();
     logs = [];
 
     await validateUpgradeAction(args({ contract: "Box_Proxy" }), makeHre(undefined) as never);

@@ -18,27 +18,17 @@ import { tmpdir } from "node:os";
 // Module mocks (partial: keeps readDeployments and resolveArtifactName real)
 // ---------------------------------------------------------------------------
 
-vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
-  return {
-    ...orig,
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
-  };
-});
+const analyze = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/plugin/hooks/compile.js", () => ({
-  getInMemoryValidations: vi.fn().mockReturnValue(null),
-}));
-
-vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: () => analyze,
 }));
 
 import deployOverride from "../src/plugin/hooks/deploy.js";
 import { updateProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
-import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import { fakeAnalysis, type FakeAnalysisOptions } from "./helpers/analysis.js";
+import { calculateERC7201StorageLocation } from "@openzeppelin/upgrades-core/dist/utils/erc7201.js";
 import { makeDeadChain, makeMockChain, type MockChainState } from "./helpers/mock-chain.js";
 import { METADATA } from "./helpers/metadata.js";
 
@@ -169,9 +159,7 @@ beforeEach(async () => {
   deploymentsDir = join(tmpDir, "deployments", "localhost");
   await mkdir(deploymentsDir, { recursive: true });
   vi.clearAllMocks();
-  vi.mocked(getContractBuildData).mockResolvedValue({
-    upgradeStorageLayout: testLayout,
-  } as never);
+  analyze.mockResolvedValue(fakeAnalysis(testLayout));
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -229,6 +217,17 @@ describe("fresh proxy deployment", () => {
 
     expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
     expect(await readIndex(deploymentsDir, PROXY)).toMatchObject({ implementation: IMPL });
+  });
+
+  it("says why it records nothing when the build cannot be analyzed", async () => {
+    analyze.mockRejectedValue(new Error("build info x lacks output the upgrade check needs"));
+
+    await deployOverride({}, makeHre(liveChain()) as never, deploying(proxyFiles(IMPL)));
+
+    expect(await readRecord(deploymentsDir, IMPL)).toBeUndefined();
+    expect(vi.mocked(console.warn).mock.calls.flat().join("\n")).toMatch(
+      /Could not record the layout of MyContract.*lacks output/,
+    );
   });
 
   it("says why it records nothing for a build without a metadata hash", async () => {
@@ -532,8 +531,8 @@ describe("in-place upgrades", () => {
   }
 
   // The chain runs IMPL until the deploy, then NEW_IMPL, as a real upgrade does.
-  async function upgradeTo(newLayout: unknown, deployFiles = true) {
-    vi.mocked(getContractBuildData).mockResolvedValue({ upgradeStorageLayout: newLayout } as never);
+  async function upgradeTo(newLayout: unknown, deployFiles = true, next?: FakeAnalysisOptions) {
+    analyze.mockResolvedValue(fakeAnalysis(newLayout as never, next));
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     let current = makeMockChain(chainState(IMPL));
     const provider = { send: vi.fn((m: string, p?: unknown[]) => current.send(m, p)) };
@@ -565,6 +564,62 @@ describe("in-place upgrades", () => {
     expect(errors).toContain(`It replaced ${IMPL}; if nothing has written`);
     expect(errors).toContain(`upgrading back to ${IMPL} restores it.`);
     expect(await readIndex(deploymentsDir, PROXY)).toMatchObject({ implementation: NEW_IMPL });
+  });
+
+  describe("ERC-7201 namespaces", () => {
+    const loc = (id: string) => calculateERC7201StorageLocation(id);
+    const slot = (id: string, actual = loc(id)) => ({
+      namespace: `erc7201:${id}`,
+      expected: loc(id),
+      actual,
+      status: (actual === loc(id) ? "match" : "mismatch") as "match" | "mismatch",
+    });
+    const ns = (id: string) => ({
+      storage: [],
+      types: testLayout.types,
+      namespaces: { [`erc7201:${id}`]: [{ ...testLayout.storage[0]!, contract: "MyContract" }] },
+    });
+
+    // IMPL's record: `id`'s layout, with the slots its code used when given.
+    async function recordedAt(id: string, slots?: ReturnType<typeof slot>[]) {
+      await indexedAt(IMPL);
+      await writeLayoutRecord(join(deploymentsDir, ".storage-layouts"), {
+        ...(await readRecord(deploymentsDir, IMPL)),
+        layout: ns(id),
+        ...(slots !== undefined ? { namespaces: slots } : {}),
+      } as never);
+    }
+
+    it("records the new implementation with its proxy kind and namespace slots", async () => {
+      await writeDeployments(deploymentsDir, proxyFiles(IMPL));
+      await recordedAt("vault.main", [slot("vault.main")]);
+      await upgradeTo(ns("vault.main"), true, { kind: "uups", namespaces: [slot("vault.main")] });
+      expect(await readRecord(deploymentsDir, NEW_IMPL)).toMatchObject({
+        kind: "uups",
+        namespaces: [slot("vault.main")],
+      });
+    });
+
+    it("passes a corrected annotation over the namespace's unchanged slot", async () => {
+      // The deployed code used vault.main's slot under the annotation vault.old.
+      await writeDeployments(deploymentsDir, proxyFiles(IMPL));
+      await recordedAt("vault.old", [slot("vault.old", loc("vault.main"))]);
+      const errors = await upgradeTo(ns("vault.main"), true, {
+        namespaces: [slot("vault.main")],
+      });
+      expect(errors).toBe("");
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it("says the namespaces were compared by annotation when the old record has no slots", async () => {
+      await writeDeployments(deploymentsDir, proxyFiles(IMPL));
+      await recordedAt("vault.main");
+      await upgradeTo(ns("vault.main"), true, { namespaces: [slot("vault.main")] });
+      expect(process.exitCode).toBeUndefined();
+      expect(vi.mocked(console.warn).mock.calls.flat().join("\n")).toMatch(
+        /checked with a caveat[\s\S]*compared by annotation only/,
+      );
+    });
   });
 
   it("passes a compatible upgrade", async () => {
@@ -612,7 +667,7 @@ describe("in-place upgrades", () => {
   it("exits 1 when the new implementation's layout cannot be recorded", async () => {
     await writeDeployments(deploymentsDir, proxyFiles(IMPL));
     await indexedAt(IMPL);
-    vi.mocked(getContractBuildData).mockResolvedValue({ upgradeStorageLayout: undefined } as never);
+    analyze.mockRejectedValue(new Error("build info x lacks output the upgrade check needs"));
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     let current = makeMockChain(chainState(IMPL));
     const provider = { send: vi.fn((m: string, p?: unknown[]) => current.send(m, p)) };
@@ -655,9 +710,7 @@ describe("in-place upgrades", () => {
       MyContract: { address: OTHER, ...logicArtifact, upgradeStorageLayout: testLayout },
     });
     // The deploy puts MyContract at PROXY, a first deployment there.
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      upgradeStorageLayout: renamedLayout,
-    } as never);
+    analyze.mockResolvedValue(fakeAnalysis(renamedLayout as never));
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     await deployOverride({}, makeHre(liveChain()) as never, deploying(proxyFiles(IMPL)));
     expect(err).not.toHaveBeenCalled();

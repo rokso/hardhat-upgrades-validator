@@ -5,7 +5,7 @@
  * each proxy runs on-chain. The local-build path must prove the chain runs
  * that build; --force only overwrites, it never skips the proof.
  *
- * Uses a real tmpdir and a mock chain; getContractBuildData is mocked.
+ * Uses a real tmpdir and a mock chain; the build analyzer is mocked.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
@@ -20,15 +20,13 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
   return {
     ...orig,
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
     resolveArtifactName: vi.fn().mockImplementation((_: unknown, name: string) => name),
   };
 });
 
-vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: vi.fn(),
 }));
 
 vi.mock("../src/core/onchain/baseline.js", async (importOriginal) => {
@@ -37,10 +35,9 @@ vi.mock("../src/core/onchain/baseline.js", async (importOriginal) => {
 });
 
 import recordBaselineAction from "../src/plugin/tasks/record-baseline.js";
-import {
-  getContractBuildData,
-  ArtifactNotFoundError,
-} from "../src/plugin/internals/deployment-utils.js";
+import { ArtifactNotFoundError } from "../src/plugin/internals/deployment-utils.js";
+import { createBuildAnalyzer } from "../src/plugin/internals/build-analysis.js";
+import { fakeAnalysis } from "./helpers/analysis.js";
 import { resolveImplementationLayout } from "../src/core/onchain/baseline.js";
 import { makeDeadChain, makeMockChain } from "./helpers/mock-chain.js";
 import { METADATA } from "./helpers/metadata.js";
@@ -60,6 +57,8 @@ const IMMUTABLES = { "7": [{ start: 5, length: 32 }] };
 const DEPLOYED = "0x6080604052" + "ab".repeat(32) + "fe" + METADATA;
 // What runs at the proxy address: unrelated to the implementation's code.
 const PROXY_CODE = "0x60806040" + "cd".repeat(16);
+
+const analyze = vi.fn();
 
 const testLayout = {
   storage: [
@@ -131,9 +130,8 @@ beforeEach(async () => {
   deploymentsDir = join(tmpDir, "deployments", "localhost");
   await mkdir(deploymentsDir, { recursive: true });
   vi.clearAllMocks();
-  vi.mocked(getContractBuildData).mockResolvedValue({
-    upgradeStorageLayout: testLayout,
-  } as never);
+  vi.mocked(createBuildAnalyzer).mockReturnValue(analyze);
+  analyze.mockResolvedValue(fakeAnalysis(testLayout));
   logs = [];
   vi.spyOn(console, "log").mockImplementation((m: string) => void logs.push(String(m)));
   await writeDeployment("MyContract", { address: PROXY, implementation: IMPL });
@@ -167,6 +165,26 @@ describe("local build", () => {
       source: "local-compile",
       layout: testLayout,
     });
+  });
+
+  it("records the proxy kind and each namespace's slot from the local build", async () => {
+    const chain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
+      implementations: { [PROXY]: IMPL },
+    });
+    const slot = "0x" + "ab".repeat(32);
+    const namespaced = {
+      ...testLayout,
+      namespaces: { "erc7201:my.ns": [{ ...testLayout.storage[0]!, slot: "0" }] },
+    };
+    const namespaces = [
+      { namespace: "erc7201:my.ns", expected: slot, actual: slot, status: "match" as const },
+    ];
+    analyze.mockResolvedValue(fakeAnalysis(namespaced, { kind: "uups", namespaces }));
+
+    await recordBaselineAction(baseArgs, makeHre(chain) as never);
+
+    expect(await readRecord(IMPL)).toMatchObject({ kind: "uups", namespaces });
   });
 
   it("never writes the deprecated upgradeStorageLayout field", async () => {
@@ -266,19 +284,19 @@ describe("local build", () => {
     expect(await readRecord(IMPL)).toBeUndefined();
   });
 
-  it("fails, recording nothing, when the new layout is missing from the validation cache", async () => {
+  it("fails, recording nothing, when the build info cannot be analyzed", async () => {
     const chain = makeMockChain({
       code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
       implementations: { [PROXY]: IMPL },
     });
-    vi.mocked(getContractBuildData).mockResolvedValue({ upgradeStorageLayout: undefined } as never);
+    analyze.mockRejectedValue(
+      new Error("build info x lacks output: run `hardhat compile --force`."),
+    );
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
     expect(await readRecord(IMPL)).toBeUndefined();
-    expect(logs.join("\n")).toMatch(
-      /\[ERROR\] "MyContract": MyContract: the validation cache is missing/,
-    );
+    expect(logs.join("\n")).toMatch(/\[ERROR\] "MyContract": build info x lacks output/);
     expect(process.exitCode).toBe(1);
   });
 
@@ -287,9 +305,7 @@ describe("local build", () => {
       code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
       implementations: { [PROXY]: IMPL },
     });
-    vi.mocked(getContractBuildData).mockRejectedValue(
-      new ArtifactNotFoundError("MyContract", new Error("HHE1000")),
-    );
+    analyze.mockRejectedValue(new ArtifactNotFoundError("MyContract", new Error("HHE1000")));
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -298,12 +314,12 @@ describe("local build", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
-  it("fails on any other error while reading build data", async () => {
+  it("fails on any other error while analyzing the build", async () => {
     const chain = makeMockChain({
       code: { [PROXY]: PROXY_CODE, [IMPL]: DEPLOYED },
       implementations: { [PROXY]: IMPL },
     });
-    vi.mocked(getContractBuildData).mockRejectedValue(new Error("getErrors exploded"));
+    analyze.mockRejectedValue(new Error("getErrors exploded"));
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
 
@@ -384,7 +400,7 @@ describe("proxy index", () => {
     );
 
     expect(await readRecord(IMPL)).toBeDefined();
-    expect(vi.mocked(getContractBuildData).mock.calls.map(([n]) => n)).toEqual(["MyContract"]);
+    expect(analyze.mock.calls.map(([n]) => n)).toEqual(["MyContract"]);
   });
 });
 
@@ -478,9 +494,7 @@ describe("existing record", () => {
     const first = await readRecord(IMPL);
 
     const changed = { ...testLayout, storage: [] };
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      upgradeStorageLayout: changed,
-    } as never);
+    analyze.mockResolvedValue(fakeAnalysis(changed));
 
     await recordBaselineAction(baseArgs, makeHre(chain) as never);
     expect(await readRecord(IMPL)).toEqual(first);
@@ -558,7 +572,7 @@ describe("--from-chain", () => {
       apiKey: "KEY",
       apiUrl: "https://x",
     });
-    expect(vi.mocked(getContractBuildData)).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
   });
 
   it("reports an explorer failure as an error without aborting other contracts", async () => {

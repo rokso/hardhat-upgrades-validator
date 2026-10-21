@@ -17,10 +17,12 @@ vi.mock("../src/core/onchain/baseline.js", async (importOriginal) => {
 });
 
 import {
+  baselineSide,
   explorerConfig,
   resolveBaseline,
   type BaselineContext,
 } from "../src/plugin/internals/baseline.js";
+import { calculateERC7201StorageLocation } from "@openzeppelin/upgrades-core/dist/utils/erc7201.js";
 import { resolveImplementationLayout } from "../src/core/onchain/baseline.js";
 import { LayoutIntegrityError, LayoutUnavailableError } from "../src/core/onchain/errors.js";
 import { updateProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
@@ -86,6 +88,65 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(tmpDir, { recursive: true });
+});
+
+// What the upgrade check takes from the baseline besides its layout.
+describe("resolveBaseline: proxy kind and namespace slots", () => {
+  const slots = [
+    {
+      namespace: "erc7201:live",
+      expected: calculateERC7201StorageLocation("live"),
+      actual: calculateERC7201StorageLocation("live"),
+      status: "match" as const,
+    },
+  ];
+  const full = (): LayoutRecord => ({
+    ...record(LIVE, liveLayout),
+    kind: "uups",
+    namespaces: slots,
+  });
+
+  it("chain: carries the record's kind and slots through to the check", async () => {
+    vi.mocked(resolveImplementationLayout).mockResolvedValue({
+      implementation: LIVE,
+      record: full(),
+      origin: "store",
+    });
+    const r = await resolveBaseline(ctx({ provider: chain() }));
+    expect(baselineSide(r)).toEqual({ layout: liveLayout, namespaces: slots, kind: "uups" });
+  });
+
+  it("offline: carries the record's kind and slots through to the check", async () => {
+    await writeLayoutRecord(storeDir(), full());
+    await indexAt(LIVE);
+    const r = await resolveBaseline(ctx());
+    expect(baselineSide(r)).toEqual({ layout: liveLayout, namespaces: slots, kind: "uups" });
+  });
+
+  it("offline: a proxy the index saw behind a beacon is checked as a beacon", async () => {
+    await writeLayoutRecord(storeDir(), full());
+    await updateProxyEntry(storeDir(), {
+      format: 1,
+      proxy: PROXY,
+      chainId: 1,
+      implementation: LIVE,
+      beacon: "0x00000000000000000000000000000000000000dd",
+      deployments: ["MyContract"],
+      observedAtBlock: 42,
+    });
+    expect((await resolveBaseline(ctx())).kind).toBe("beacon");
+  });
+
+  it("the deprecated field has neither", async () => {
+    const r = await resolveBaseline(
+      ctx({ deployment: { address: PROXY, upgradeStorageLayout: fieldLayout as never } }),
+    );
+    expect(baselineSide(r)).toEqual({
+      layout: fieldLayout,
+      namespaces: undefined,
+      kind: undefined,
+    });
+  });
 });
 
 describe("resolveBaseline", () => {

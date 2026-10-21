@@ -1,4 +1,5 @@
 import type { getErrors, getStorageUpgradeReport } from "@openzeppelin/upgrades-core";
+import { SAFETY_ERROR_KINDS, type NamespaceCheck, type SafetyErrorKind } from "slotdiff";
 
 // Re-export OZ's StorageLayout as the canonical layout type used throughout
 // this package. Consumers who need the layout shape can import it from here.
@@ -29,6 +30,12 @@ export interface ValidationResult {
    */
   storage?: StorageReport;
   safetyErrors: SafetyError[];
+  /**
+   * ERC-7201 namespaces paired by the slot the code uses, not only the
+   * annotation. Undefined when there is no baseline or the storage check was
+   * skipped.
+   */
+  namespaces?: NamespaceCheck;
   warnings: ValidationWarning[];
   /** Where the old layout came from; set by the tasks, hooks and proxy helpers. */
   baseline?: BaselineInfo;
@@ -62,7 +69,9 @@ export type ValidationWarning =
   | { kind: "no-baseline"; contractName: string }
   | { kind: "storage-check-skipped"; contractName: string }
   | { kind: "deprecated-baseline"; contractName: string }
-  | { kind: "chain-baseline-unavailable"; contractName: string; reason: string };
+  | { kind: "chain-baseline-unavailable"; contractName: string; reason: string }
+  | { kind: "namespaces-unchecked"; contractName: string; reason: string }
+  | { kind: "kind-from-new-code"; contractName: string; proxyKind: ProxyKind };
 
 // ---------------------------------------------------------------------------
 // Validation options
@@ -79,8 +88,9 @@ export interface ValidateOptions {
    */
   unsafeSkipStorageCheck?: boolean;
   /**
-   * Proxy kind to use for validation rules.
-   * Defaults to "transparent" when not provided.
+   * The kind of the proxy being upgraded, for OZ's safety rules. Defaults to
+   * the baseline's (`beacon` when a beacon serves the proxy, else the kind the
+   * running implementation's code implies), else the new implementation's.
    */
   kind?: ProxyKind;
 }
@@ -97,25 +107,7 @@ export const PROXY_KINDS: readonly ProxyKind[] = ["transparent", "uups", "beacon
 // Unsafe-allow escape hatch: OZ's error kinds
 // ---------------------------------------------------------------------------
 
-export type UnsafeAllowKind = SafetyError["kind"];
+/** OZ's error kinds that can be reported, as slotdiff lists them. */
+export type UnsafeAllowKind = SafetyErrorKind;
 
-/**
- * OZ's error kinds (`errorKinds` in upgrades-core, not exported from its
- * index). A test keeps this list in sync with the installed version.
- */
-export const UNSAFE_ALLOW_KINDS: readonly UnsafeAllowKind[] = [
-  "state-variable-assignment",
-  "state-variable-immutable",
-  "external-library-linking",
-  "struct-definition",
-  "enum-definition",
-  "constructor",
-  "delegatecall",
-  "selfdestruct",
-  "missing-public-upgradeto",
-  "internal-function-storage",
-  "missing-initializer",
-  "missing-initializer-call",
-  "duplicate-initializer-call",
-  "incorrect-initializer-order",
-];
+export const UNSAFE_ALLOW_KINDS: readonly UnsafeAllowKind[] = SAFETY_ERROR_KINDS;

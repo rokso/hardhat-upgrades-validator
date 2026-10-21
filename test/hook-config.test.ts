@@ -45,7 +45,7 @@ const selectionOf = (c: { settings: { outputSelection?: unknown } }) =>
   c.settings.outputSelection as Record<string, Record<string, string[]>>;
 
 describe("requestValidationOutputs", () => {
-  it("adds storageLayout and ast to every compiler in every profile, overrides included", () => {
+  it("adds storageLayout, metadata and ast to every compiler in every profile, overrides included", () => {
     const solidity = config();
     requestValidationOutputs(solidity);
 
@@ -56,6 +56,7 @@ describe("requestValidationOutputs", () => {
     expect(compilers).toHaveLength(4);
     for (const c of compilers) {
       expect(selectionOf(c)["*"]["*"]).toContain("storageLayout");
+      expect(selectionOf(c)["*"]["*"]).toContain("metadata");
       expect(selectionOf(c)["*"][""]).toContain("ast");
     }
   });
@@ -65,7 +66,7 @@ describe("requestValidationOutputs", () => {
     requestValidationOutputs(solidity);
 
     const [, second] = solidity.profiles.default.compilers;
-    expect(selectionOf(second)["*"]["*"]).toEqual(["abi", "storageLayout"]);
+    expect(selectionOf(second)["*"]["*"]).toEqual(["abi", "storageLayout", "metadata"]);
     expect(selectionOf(second)["*"][""]).toEqual(["ast"]);
     const override = solidity.profiles.default.overrides["contracts/A.sol"];
     expect(selectionOf(override)["contracts/A.sol"]).toEqual({ A: ["metadata"] });
@@ -85,6 +86,7 @@ describe("requestValidationOutputs", () => {
     requestValidationOutputs(solidity);
     expect(selectionOf(solidity.profiles.default.compilers[0])["*"]["*"]).toEqual([
       "storageLayout",
+      "metadata",
     ]);
   });
 });

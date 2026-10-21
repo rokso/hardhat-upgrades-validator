@@ -1,12 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { writeFile, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import {
-  stripBytecodeMetadata,
-  readDeployment,
-  resolveWinnerSource,
-} from "../src/plugin/internals/deployment-utils.js";
+import { stripBytecodeMetadata, readDeployment } from "../src/plugin/internals/deployment-utils.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,56 +85,5 @@ describe("stripBytecodeMetadata", () => {
 
   it("returns original for empty string", () => {
     expect(stripBytecodeMetadata("0x")).toBe("0x");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// resolveWinnerSource
-// ---------------------------------------------------------------------------
-
-describe("resolveWinnerSource", () => {
-  it("returns an exact match when artifact source matches a key directly", () => {
-    const result = resolveWinnerSource(
-      ["contracts/Token.sol", "lib/Token.sol"],
-      "contracts/Token.sol",
-      "Token",
-    );
-    expect(result).toBe("contracts/Token.sol");
-  });
-
-  it("returns a suffix match when artifact source is a bare filename", () => {
-    const result = resolveWinnerSource(["contracts/Token.sol"], "Token.sol", "Token");
-    expect(result).toBe("contracts/Token.sol");
-  });
-
-  it("returns first match and warns once when multiple keys match the artifact source", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    const result = resolveWinnerSource(
-      ["contracts/Token.sol", "lib/Token.sol"],
-      "Token.sol",
-      "Token",
-    );
-
-    expect(result).toBe("contracts/Token.sol");
-    expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0]![0]).toContain("Ambiguous source");
-    expect(warn.mock.calls[0]![0]).toContain("Token.sol");
-
-    warn.mockRestore();
-  });
-
-  it("does not warn when exactly one key matches", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    resolveWinnerSource(["contracts/Token.sol"], "Token.sol", "Token");
-
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it("falls back to artifactSource when no key matches", () => {
-    const result = resolveWinnerSource(["contracts/Other.sol"], "Token.sol", "Token");
-    expect(result).toBe("Token.sol");
   });
 });

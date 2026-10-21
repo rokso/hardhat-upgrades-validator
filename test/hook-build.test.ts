@@ -20,29 +20,31 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
   return {
     ...orig,
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
     resolveArtifactName: vi.fn().mockImplementation((_: unknown, name: string) => name),
   };
 });
+
+const analyze = vi.hoisted(() => vi.fn());
+
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: () => analyze,
+}));
 
 vi.mock("../src/core/validator.js", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/core/validator.js")>();
   return {
     ...orig,
-    validateStorageUpgrade: vi.fn().mockReturnValue({
-      ok: true,
-      safetyErrors: [],
-      warnings: [],
-    }),
+    validateUpgrade: vi.fn(),
     formatValidationResult: vi.fn().mockReturnValue("OK"),
   };
 });
 
 import compileHookFactory from "../src/plugin/hooks/compile.js";
 import { updateProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
-import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
-import { validateStorageUpgrade, formatValidationResult } from "../src/core/validator.js";
+import * as realValidator from "../src/core/validator.js";
+import { validateUpgrade, formatValidationResult } from "../src/core/validator.js";
+import { fakeAnalysis } from "./helpers/analysis.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,16 +90,12 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "huv-build-test-"));
   deploymentsBase = join(tmpDir, "deployments");
   vi.clearAllMocks();
-  vi.mocked(getContractBuildData).mockResolvedValue({
-    upgradeStorageLayout: testLayout,
-    safetyErrors: [],
-    proxyKind: undefined,
-  } as never);
-  vi.mocked(validateStorageUpgrade).mockReturnValue({
-    ok: true,
-    safetyErrors: [],
-    warnings: [],
-  });
+  analyze.mockResolvedValue(fakeAnalysis(testLayout));
+  // The real check; tests override it to force an outcome.
+  const { validateUpgrade: real } = await vi.importActual<typeof realValidator>(
+    "../src/core/validator.js",
+  );
+  vi.mocked(validateUpgrade).mockImplementation(real);
 });
 
 afterEach(async () => {
@@ -123,9 +121,9 @@ describe("auto-validation network scan", () => {
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
 
-    // getContractBuildData called once per contract (one per network)
-    expect(vi.mocked(getContractBuildData).mock.calls).toHaveLength(2);
-    const names = vi.mocked(getContractBuildData).mock.calls.map((c) => c[0]);
+    // The analyzer is called once per contract (one per network)
+    expect(analyze.mock.calls).toHaveLength(2);
+    const names = analyze.mock.calls.map((c) => c[0]);
     expect(names).toContain("ContractA");
     expect(names).toContain("ContractB");
   });
@@ -137,7 +135,7 @@ describe("auto-validation network scan", () => {
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
 
-    expect(vi.mocked(getContractBuildData)).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
   });
 
   it("does nothing when deployments directory does not exist", async () => {
@@ -145,7 +143,7 @@ describe("auto-validation network scan", () => {
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
 
-    expect(vi.mocked(getContractBuildData)).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
   });
 
   it("does not scan when build scope is not 'contracts'", async () => {
@@ -157,7 +155,7 @@ describe("auto-validation network scan", () => {
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], { scope: "scripts" } as never, makeNext());
 
-    expect(vi.mocked(getContractBuildData)).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
   });
 });
 
@@ -186,8 +184,8 @@ describe("upgradesValidator.networks config", () => {
     const hooks = await compileHookFactory();
     await hooks.build(ctx as never, [], undefined, makeNext());
 
-    expect(vi.mocked(getContractBuildData).mock.calls).toHaveLength(1);
-    expect(vi.mocked(getContractBuildData).mock.calls[0]![0]).toBe("ContractA");
+    expect(analyze.mock.calls).toHaveLength(1);
+    expect(analyze.mock.calls[0]![0]).toBe("ContractA");
   });
 
   it("validates all networks when networks is 'all'", async () => {
@@ -210,7 +208,7 @@ describe("upgradesValidator.networks config", () => {
     const hooks = await compileHookFactory();
     await hooks.build(ctx as never, [], undefined, makeNext());
 
-    expect(vi.mocked(getContractBuildData).mock.calls).toHaveLength(2);
+    expect(analyze.mock.calls).toHaveLength(2);
   });
 
   it("does nothing when networks list has no overlap with deployment dirs", async () => {
@@ -229,7 +227,7 @@ describe("upgradesValidator.networks config", () => {
     const hooks = await compileHookFactory();
     await hooks.build(ctx as never, [], undefined, makeNext());
 
-    expect(vi.mocked(getContractBuildData)).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
   });
 });
 
@@ -237,17 +235,32 @@ describe("upgradesValidator.networks config", () => {
 // process.exitCode on validation failure
 // ---------------------------------------------------------------------------
 
+describe("enableCompileHook", () => {
+  it("checks nothing when disabled", async () => {
+    await writeDeployment("localhost", "ContractA", {
+      address: "0x1",
+      upgradeStorageLayout: testLayout,
+    });
+    const context = makeContext() as ReturnType<typeof makeContext> & {
+      config: { upgradesValidator?: unknown };
+    };
+    context.config.upgradesValidator = { enableCompileHook: false };
+
+    const hooks = await compileHookFactory();
+    const result = await hooks.build(context as never, [], undefined, makeNext());
+
+    expect(result).toBeInstanceOf(Map);
+    expect(analyze).not.toHaveBeenCalled();
+  });
+});
+
 describe("process.exitCode on validation failure", () => {
   it("sets process.exitCode = 1 when a contract fails validation", async () => {
     await writeDeployment("localhost", "BadContract", {
       address: "0x1",
       upgradeStorageLayout: testLayout,
     });
-    vi.mocked(validateStorageUpgrade).mockReturnValue({
-      ok: false,
-      safetyErrors: [],
-      warnings: [],
-    });
+    vi.mocked(validateUpgrade).mockReturnValue({ ok: false, safetyErrors: [], warnings: [] });
 
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
@@ -260,11 +273,11 @@ describe("process.exitCode on validation failure", () => {
       address: "0x1",
       upgradeStorageLayout: testLayout,
     });
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      upgradeStorageLayout: testLayout,
-      safetyErrors: [{ kind: "missing-initializer-call", src: "contracts/A.sol:1" }],
-      proxyKind: undefined,
-    } as never);
+    analyze.mockResolvedValue(
+      fakeAnalysis(testLayout, {
+        safetyErrors: [{ kind: "missing-initializer-call", src: "contracts/A.sol:1" }],
+      }),
+    );
 
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
@@ -284,12 +297,12 @@ describe("process.exitCode on validation failure", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
-  it("sets process.exitCode = 1 when getContractBuildData throws for any contract", async () => {
+  it("sets process.exitCode = 1 when the analysis throws for any contract", async () => {
     await writeDeployment("localhost", "Broken", {
       address: "0x1",
       upgradeStorageLayout: testLayout,
     });
-    vi.mocked(getContractBuildData).mockRejectedValue(new Error("artifact not found"));
+    analyze.mockRejectedValue(new Error("artifact not found"));
 
     const hooks = await compileHookFactory();
     await hooks.build(makeContext() as never, [], undefined, makeNext());
@@ -302,8 +315,8 @@ describe("process.exitCode on validation failure", () => {
 // Skipped contracts are named, never hidden behind "all passed"
 // ---------------------------------------------------------------------------
 
-describe("skipped contracts", () => {
-  it("names a contract whose new layout is missing from the validation cache", async () => {
+describe("contracts that cannot be analyzed", () => {
+  it("fails one whose build info cannot be analyzed, instead of skipping it", async () => {
     await writeDeployment("localhost", "Good", {
       address: "0x1",
       upgradeStorageLayout: testLayout,
@@ -312,21 +325,21 @@ describe("skipped contracts", () => {
       address: "0x2",
       upgradeStorageLayout: testLayout,
     });
-    vi.mocked(getContractBuildData).mockImplementation(async (name: string) =>
-      name === "Missing"
-        ? ({ upgradeStorageLayout: undefined, safetyErrors: [], proxyKind: undefined } as never)
-        : ({ upgradeStorageLayout: testLayout, safetyErrors: [], proxyKind: undefined } as never),
-    );
+    analyze.mockImplementation(async (name: string) => {
+      if (name === "Missing") throw new Error("build info x lacks output the upgrade check needs");
+      return fakeAnalysis(testLayout);
+    });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const hooks = await compileHookFactory();
       await hooks.build(makeContext() as never, [], undefined, makeNext());
-      const out = log.mock.calls.flat().join("\n");
-      expect(out).toMatch(/\[SKIP\] "localhost\/Missing": Missing: .*validation cache/);
-      expect(out).toContain("Storage layout checks passed; 1 skipped");
-      expect(out).not.toContain("All storage layout checks passed");
+      expect(err.mock.calls.flat().join("\n")).toMatch(/"Missing".*lacks output/);
+      expect(log.mock.calls.flat().join("\n")).not.toContain("checks passed");
+      expect(process.exitCode).toBe(1);
     } finally {
       log.mockRestore();
+      err.mockRestore();
     }
   });
 });
@@ -391,7 +404,7 @@ describe("auto-validation from the proxy index", () => {
 
     const out = await build();
 
-    expect(vi.mocked(getContractBuildData).mock.calls.map((c) => c[0])).toEqual(["Recorded"]);
+    expect(analyze.mock.calls.map((c) => c[0])).toEqual(["Recorded"]);
     expect(out).toMatch(
       /\[SKIP\] "mainnet\/Unrecorded": No baseline for "Unrecorded": no layout record for 0x0+cc, the implementation as of block 42/,
     );
@@ -430,7 +443,7 @@ describe("auto-validation from the proxy index", () => {
 
     const out = await build();
 
-    expect(vi.mocked(getContractBuildData).mock.calls.map((c) => c[0])).toEqual(["Legacy"]);
+    expect(analyze.mock.calls.map((c) => c[0])).toEqual(["Legacy"]);
     expect(vi.mocked(formatValidationResult)).toHaveBeenCalledTimes(1);
     expect(out).toContain("OK");
   });

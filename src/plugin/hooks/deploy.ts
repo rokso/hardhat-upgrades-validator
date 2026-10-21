@@ -20,7 +20,6 @@
  * Adopting the plugin in an existing project: run `record-baseline --all` once.
  */
 
-import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 import type { TaskArguments } from "hardhat/types/tasks";
 import { createHash } from "node:crypto";
@@ -30,15 +29,16 @@ import { join, resolve } from "node:path";
 import {
   readDeployments,
   resolveArtifactName,
-  getContractBuildData,
-  createBuildInfoOutputCache,
   selectedNetwork,
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
-import { validateStorageUpgrade, formatValidationResult } from "../../core/validator.js";
+import {
+  formatValidationResult,
+  validateRecordUpgrade,
+  type UpgradeBaseline,
+} from "../../core/validator.js";
 import type { StorageLayout } from "../../types/validation.js";
-import { getInMemoryValidations } from "./compile.js";
-import { loadValidationsFromDisk } from "../internals/validations-cache.js";
+import { ArtifactNotFoundError, createBuildAnalyzer } from "../internals/build-analysis.js";
 import { probe } from "../internals/baseline.js";
 import { assertSameChain } from "../internals/chain-identity.js";
 import {
@@ -293,21 +293,17 @@ function makeRecorder(
   provider: EthProvider,
   storeDir: string,
 ): (address: string, artifactName: string, label: string) => Promise<boolean> {
-  const cache = createBuildInfoOutputCache();
-  let validations: Promise<ValidationDataCurrent | undefined> | undefined;
+  const analyze = createBuildAnalyzer(hre.artifacts, hre.solidity);
 
   return async (address, artifactName, label) => {
     try {
       if ((await readLayoutRecord(storeDir, address)) !== undefined) return true;
 
-      validations ??= Promise.resolve(
-        getInMemoryValidations() ?? loadValidationsFromDisk(hre.config.paths.cache),
-      );
-      let upgradeStorageLayout;
+      let analysis;
       let artifact;
       try {
-        [{ upgradeStorageLayout }, artifact] = await Promise.all([
-          getContractBuildData(artifactName, hre.artifacts, await validations, cache),
+        [analysis, artifact] = await Promise.all([
+          analyze(artifactName),
           hre.artifacts.readArtifact(artifactName) as Promise<{
             contractName: string;
             sourceName: string;
@@ -315,14 +311,16 @@ function makeRecorder(
             immutableReferences?: ImmutableReferences;
           }>,
         ]);
-      } catch {
-        return false; // artifact not found: not our contract
+      } catch (e) {
+        if (e instanceof ArtifactNotFoundError) return false; // not our contract
+        throw e;
       }
-      if (upgradeStorageLayout === undefined) return false;
 
       const { bytecodeMatch, record } = await recordLocalBuild(provider, storeDir, address, {
         contract: `${artifact.sourceName}:${artifact.contractName}`,
-        layout: upgradeStorageLayout,
+        layout: analysis.layout,
+        kind: analysis.kind,
+        namespaces: analysis.namespaces,
         deployedBytecode: artifact.deployedBytecode,
         immutableReferences: artifact.immutableReferences,
       });
@@ -372,14 +370,15 @@ async function checkInPlaceUpgrade(
   const previousImpl = before.implementations.get(proxy.proxy);
   if (previousImpl === proxy.implementation) return;
 
-  let previous: StorageLayout | undefined;
+  let previous: UpgradeBaseline | undefined;
   if (previousImpl !== undefined) {
-    previous = (await readLayoutRecord(storeDir, previousImpl))?.layout;
+    previous = await readLayoutRecord(storeDir, previousImpl);
   }
   // No record, or not a proxy known before: the deprecated field at the same address.
-  previous ??= proxy.deployments
+  const field = proxy.deployments
     .map((n) => before.fileBaselines.get(n))
     .find((b) => b?.address?.toLowerCase() === proxy.proxy)?.layout;
+  previous ??= field === undefined ? undefined : { layout: field };
   if (previous === undefined) {
     if (previousImpl === undefined) return; // a first deployment: nothing ran before
     throw new Error(
@@ -389,7 +388,7 @@ async function checkInPlaceUpgrade(
     );
   }
 
-  const current = (await readLayoutRecord(storeDir, proxy.implementation))?.layout;
+  const current = await readLayoutRecord(storeDir, proxy.implementation);
   if (current === undefined) {
     throw new Error(
       `it now runs ${proxy.implementation}, whose layout could not be recorded from the local ` +
@@ -398,7 +397,7 @@ async function checkInPlaceUpgrade(
     );
   }
 
-  const check = validateStorageUpgrade(proxy.deployments[0]!, previous, current);
+  const check = validateRecordUpgrade(proxy.deployments[0]!, previous, current);
   if (!check.ok) {
     // An upgrade alone writes no storage: until the new code writes, upgrading
     // back to the previous implementation undoes it.
@@ -415,5 +414,11 @@ async function checkInPlaceUpgrade(
         formatValidationResult(`${network}/${proxy.deployments.join(", ")}`, check),
     );
     process.exitCode = 1;
+  } else if (check.warnings.length > 0) {
+    logger.warn(
+      `"${network}" ${proxy.proxy}: the upgrade to ${proxy.implementation} was checked with a ` +
+        `caveat:` +
+        formatValidationResult(`${network}/${proxy.deployments.join(", ")}`, check),
+    );
   }
 }

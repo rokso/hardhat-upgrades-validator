@@ -17,12 +17,15 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
   return {
     ...orig,
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
     resolveArtifactName: vi.fn().mockImplementation((_: unknown, name: string) => name),
     readDeployment: vi.fn(),
   };
 });
+
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: vi.fn(),
+}));
 
 vi.mock("../src/plugin/internals/proxy-discovery.js", () => ({
   listProxyDeployments: vi.fn(),
@@ -36,22 +39,17 @@ vi.mock("../src/core/validator.js", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/core/validator.js")>();
   return {
     ...orig,
-    validateStorageUpgrade: vi.fn().mockReturnValue({
-      ok: true,
-      safetyErrors: [],
-      warnings: [],
-    }),
+    // The real check, recorded: tests read the options it was given.
+    validateUpgrade: vi.fn().mockImplementation(orig.validateUpgrade),
     formatValidationResult: vi.fn().mockReturnValue("OK"),
   };
 });
 
 import validateUpgradeAction from "../src/plugin/tasks/validate-upgrade.js";
-import {
-  getContractBuildData,
-  readDeployment,
-  ArtifactNotFoundError,
-} from "../src/plugin/internals/deployment-utils.js";
-import { validateStorageUpgrade } from "../src/core/validator.js";
+import { readDeployment, ArtifactNotFoundError } from "../src/plugin/internals/deployment-utils.js";
+import { createBuildAnalyzer } from "../src/plugin/internals/build-analysis.js";
+import { validateUpgrade } from "../src/core/validator.js";
+import { fakeAnalysis } from "./helpers/analysis.js";
 import {
   listProxyDeployments,
   discoverProxies,
@@ -75,13 +73,19 @@ function makeHre(root: string, ...network: [string?]) {
   };
 }
 
+const analyze = vi.fn();
+
 function defaultBuildData() {
-  return {
-    upgradeStorageLayout: { storage: [], types: {}, namespaces: {} },
-    safetyErrors: [],
-    proxyKind: undefined,
-  };
+  return fakeAnalysis({ storage: [], types: {}, namespaces: {} });
 }
+
+/** The options validate-upgrade passed to the upgrade check. */
+const checkOptions = () =>
+  vi.mocked(validateUpgrade).mock.calls[0]![3] as {
+    unsafeAllow?: string[];
+    unsafeAllowRenames?: boolean;
+    kind?: string;
+  };
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -92,9 +96,10 @@ let tmpDir: string;
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vutest-"));
   vi.clearAllMocks();
+  vi.mocked(createBuildAnalyzer).mockReturnValue(analyze);
   // Default stubs; individual tests override as needed.
   vi.mocked(listProxyDeployments).mockResolvedValue({ names: [], errors: [], unindexed: [] });
-  vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
+  analyze.mockResolvedValue(defaultBuildData());
   vi.mocked(readDeployment).mockResolvedValue(null);
 });
 
@@ -172,7 +177,7 @@ describe("unsafeAllow token parsing", () => {
       unindexed: [],
     });
     vi.mocked(readDeployment).mockResolvedValue(null);
-    vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
+    analyze.mockResolvedValue(defaultBuildData());
   });
 
   async function run(unsafeAllow: string, unsafeAllowRenames = false) {
@@ -189,47 +194,31 @@ describe("unsafeAllow token parsing", () => {
     );
   }
 
-  it("passes OZ error kinds to OZ's getErrors and to validateStorageUpgrade", async () => {
+  it("passes OZ error kinds to the upgrade check", async () => {
     await run("constructor delegatecall");
-    const buildOpts = vi.mocked(getContractBuildData).mock.calls[0]![4] as {
-      unsafeAllow?: string[];
-    };
-    expect(buildOpts.unsafeAllow).toEqual(["constructor", "delegatecall"]);
-    const opts = vi.mocked(validateStorageUpgrade).mock.calls[0]![3] as {
-      unsafeAllow?: string[];
-    };
-    expect(opts.unsafeAllow).toEqual(["constructor", "delegatecall"]);
+    expect(checkOptions().unsafeAllow).toEqual(["constructor", "delegatecall"]);
   });
 
   it("accepts comma-separated tokens", async () => {
     await run("constructor,missing-initializer");
-    const buildOpts = vi.mocked(getContractBuildData).mock.calls[0]![4] as {
-      unsafeAllow?: string[];
-    };
-    expect(buildOpts.unsafeAllow).toEqual(["constructor", "missing-initializer"]);
+    expect(checkOptions().unsafeAllow).toEqual(["constructor", "missing-initializer"]);
   });
 
   it("rejects a token that is not an OZ error kind", async () => {
     await expect(run("constructor type-changed")).rejects.toThrow(
       /Invalid --unsafe-allow value\(s\): type-changed/,
     );
-    expect(getContractBuildData).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
   });
 
   it("uses empty unsafeAllow when flag is empty string", async () => {
     await run("");
-    const opts = vi.mocked(validateStorageUpgrade).mock.calls[0]![3] as {
-      unsafeAllow?: string[];
-    };
-    expect(opts.unsafeAllow).toEqual([]);
+    expect(checkOptions().unsafeAllow).toEqual([]);
   });
 
-  it("passes --unsafe-allow-renames to validateStorageUpgrade", async () => {
+  it("passes --unsafe-allow-renames to the upgrade check", async () => {
     await run("", true);
-    const opts = vi.mocked(validateStorageUpgrade).mock.calls[0]![3] as {
-      unsafeAllowRenames?: boolean;
-    };
-    expect(opts.unsafeAllowRenames).toBe(true);
+    expect(checkOptions().unsafeAllowRenames).toBe(true);
   });
 });
 
@@ -262,9 +251,9 @@ describe("contracts that cannot be checked fail", () => {
     }
   }
 
-  it("an error from OZ while reading build data", async () => {
+  it("an error while analyzing the build", async () => {
     vi.mocked(readDeployment).mockResolvedValue(baselined as never);
-    vi.mocked(getContractBuildData).mockRejectedValue(new Error("getErrors exploded"));
+    analyze.mockRejectedValue(new Error("getErrors exploded"));
     const { exitCode, out } = await runTask();
     expect(exitCode).toBe(1);
     expect(out).toMatch(/\[ERROR\].*getErrors exploded/);
@@ -272,9 +261,7 @@ describe("contracts that cannot be checked fail", () => {
 
   it("a baselined deployment whose artifact is missing", async () => {
     vi.mocked(readDeployment).mockResolvedValue(baselined as never);
-    vi.mocked(getContractBuildData).mockRejectedValue(
-      new ArtifactNotFoundError("MyContract", new Error("HHE1000")),
-    );
+    analyze.mockRejectedValue(new ArtifactNotFoundError("MyContract", new Error("HHE1000")));
     const { exitCode, out } = await runTask();
     expect(exitCode).toBe(1);
     expect(out).toMatch(/\[ERROR\].*artifact MyContract not found/);
@@ -282,10 +269,10 @@ describe("contracts that cannot be checked fail", () => {
 
   it("offline: validates a deployment the index does not know against its deprecated field", async () => {
     vi.mocked(readDeployment).mockResolvedValue(baselined as never);
-    vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
+    analyze.mockResolvedValue(defaultBuildData());
     await runTask();
     expect(indexedRole).toHaveBeenCalled();
-    expect(validateStorageUpgrade).toHaveBeenCalledTimes(1);
+    expect(validateUpgrade).toHaveBeenCalledTimes(1);
   });
 
   it("offline: an existing deployment with no baseline at all", async () => {
@@ -317,17 +304,14 @@ describe("contracts that cannot be checked fail", () => {
 });
 
 describe("safety errors", () => {
-  it("fails (exit code 1) for a contract missing from the validation cache", async () => {
+  it("fails (exit code 1) for a contract whose build info cannot be analyzed", async () => {
     vi.mocked(listProxyDeployments).mockResolvedValue({
       names: ["MyContract"],
       errors: [],
       unindexed: [],
     });
     vi.mocked(readDeployment).mockResolvedValue(null);
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      ...defaultBuildData(),
-      upgradeStorageLayout: undefined,
-    } as never);
+    analyze.mockRejectedValue(new Error("build info x lacks output the upgrade check needs"));
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await validateUpgradeAction(
@@ -342,7 +326,7 @@ describe("safety errors", () => {
         makeHre(tmpDir) as never,
       );
       expect(process.exitCode).toBe(1);
-      expect(logSpy.mock.calls.flat().join("\n")).toMatch(/\[ERROR\].*validation cache/);
+      expect(logSpy.mock.calls.flat().join("\n")).toMatch(/\[ERROR\].*lacks output/);
     } finally {
       process.exitCode = undefined;
       logSpy.mockRestore();
@@ -356,10 +340,12 @@ describe("safety errors", () => {
       unindexed: [],
     });
     vi.mocked(readDeployment).mockResolvedValue(null);
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      ...defaultBuildData(),
-      safetyErrors: [{ kind: "missing-public-upgradeto", src: "contracts/A.sol:1" }],
-    } as never);
+    analyze.mockResolvedValue(
+      fakeAnalysis(
+        { storage: [], types: {}, namespaces: {} },
+        { safetyErrors: [{ kind: "missing-public-upgradeto", src: "contracts/A.sol:1" }] },
+      ),
+    );
     await validateUpgradeAction(
       {
         contract: "MyContract",
@@ -391,10 +377,10 @@ describe("proxyKind override parsing", () => {
       unindexed: [],
     });
     vi.mocked(readDeployment).mockResolvedValue(null);
-    vi.mocked(getContractBuildData).mockResolvedValue(defaultBuildData() as never);
+    analyze.mockResolvedValue(defaultBuildData());
   });
 
-  it("passes 'uups' proxyKind to getContractBuildData", async () => {
+  it("passes 'uups' proxyKind to the upgrade check", async () => {
     const hre = makeHre(tmpDir);
     await validateUpgradeAction(
       {
@@ -407,12 +393,11 @@ describe("proxyKind override parsing", () => {
       },
       hre as never,
     );
-    const passedProxyKind = (vi.mocked(getContractBuildData).mock.calls[0]![4] as { kind?: string })
-      .kind;
+    const passedProxyKind = checkOptions().kind;
     expect(passedProxyKind).toBe("uups");
   });
 
-  it("passes 'transparent' proxyKind to getContractBuildData", async () => {
+  it("passes 'transparent' proxyKind to the upgrade check", async () => {
     const hre = makeHre(tmpDir);
     await validateUpgradeAction(
       {
@@ -425,8 +410,7 @@ describe("proxyKind override parsing", () => {
       },
       hre as never,
     );
-    const passedProxyKind = (vi.mocked(getContractBuildData).mock.calls[0]![4] as { kind?: string })
-      .kind;
+    const passedProxyKind = checkOptions().kind;
     expect(passedProxyKind).toBe("transparent");
   });
 
@@ -460,8 +444,7 @@ describe("proxyKind override parsing", () => {
       },
       hre as never,
     );
-    const passedProxyKind = (vi.mocked(getContractBuildData).mock.calls[0]![4] as { kind?: string })
-      .kind;
+    const passedProxyKind = checkOptions().kind;
     expect(passedProxyKind).toBeUndefined();
   });
 

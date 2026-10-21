@@ -12,13 +12,14 @@
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
 import type { ResolvedConfigurationVariable } from "hardhat/types/config";
 import { resolveImplementationLayout } from "../../core/onchain/baseline.js";
-import { ETHERSCAN_V2_API_URL } from "slotdiff";
-import { readImplementation } from "../../core/onchain/implementation.js";
+import { ETHERSCAN_V2_API_URL, type NamespaceSlot } from "slotdiff";
+import { readImplementation, readProxy } from "../../core/onchain/implementation.js";
 import { LayoutUnavailableError } from "../../core/onchain/errors.js";
 import { layoutStoreDir, readLayoutRecord, readProxyEntry } from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
 import type { UpgradesValidatorConfig } from "../../types/hardhat-type-extensions.js";
-import type { BaselineInfo, ValidationWarning } from "../../types/validation.js";
+import type { BaselineInfo, ProxyKind, ValidationWarning } from "../../types/validation.js";
+import type { UpgradeBaseline } from "../../core/validator.js";
 import { assertSameChain } from "./chain-identity.js";
 import type { DeploymentFile } from "./deployment-files.js";
 
@@ -34,6 +35,10 @@ export interface BaselineContext {
 
 export interface ResolvedBaseline {
   layout: StorageLayout | undefined;
+  /** The slot each ERC-7201 namespace used, when the record has them. */
+  namespaces?: NamespaceSlot[];
+  /** `beacon` when a beacon serves the proxy, else the kind the record's code implies. */
+  kind?: ProxyKind;
   info: BaselineInfo;
   warnings: ValidationWarning[];
 }
@@ -46,10 +51,14 @@ export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBas
   if (ctx.provider === undefined || address === undefined) return offlineBaseline(ctx, []);
 
   let implementation: string;
+  let beacon: boolean;
   try {
     await probe(ctx.provider);
     await assertSameChain(ctx.deploymentsDir, ctx.provider, { address });
-    implementation = await readImplementation(ctx.provider, address);
+    const state = await readProxy(ctx.provider, address);
+    // Not a proxy: readImplementation throws the error that says so.
+    implementation = state?.implementation ?? (await readImplementation(ctx.provider, address));
+    beacon = state?.beacon !== undefined;
   } catch (e) {
     if (!(e instanceof LayoutUnavailableError)) throw e;
     return offlineBaseline(ctx, [
@@ -66,6 +75,8 @@ export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBas
     });
     return {
       layout: chain.record.layout,
+      namespaces: chain.record.namespaces,
+      kind: beacon ? "beacon" : chain.record.kind,
       info: {
         source: "chain",
         implementation: chain.implementation,
@@ -83,6 +94,12 @@ export async function resolveBaseline(ctx: BaselineContext): Promise<ResolvedBas
         `or from verified source (record-baseline --contract ${ctx.name} --from-chain).`,
     );
   }
+}
+
+/** The baseline as the upgrade check takes it; undefined when there is none. */
+export function baselineSide(baseline: ResolvedBaseline): UpgradeBaseline | undefined {
+  const { layout, namespaces, kind } = baseline;
+  return layout === undefined ? undefined : { layout, namespaces, kind };
 }
 
 export async function explorerConfig(
@@ -168,6 +185,8 @@ async function offlineBaseline(
   }
   return {
     layout: record.layout,
+    namespaces: record.namespaces,
+    kind: entry.beacon !== undefined ? "beacon" : record.kind,
     info: {
       source: "offline-record",
       implementation: record.address,

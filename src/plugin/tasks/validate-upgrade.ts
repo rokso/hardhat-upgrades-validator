@@ -3,11 +3,7 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 
 import { resolve } from "node:path";
 
-import {
-  validateStorageUpgrade,
-  formatValidationResult,
-  withSafetyErrors,
-} from "../../core/validator.js";
+import { formatValidationResult, validateUpgrade } from "../../core/validator.js";
 import {
   UNSAFE_ALLOW_KINDS,
   PROXY_KINDS,
@@ -19,17 +15,17 @@ import {
 import {
   readDeployment,
   readDeployments,
-  getContractBuildData,
-  createBuildInfoOutputCache,
-  type BuildInfoOutputCache,
   resolveArtifactName,
   resolveDeploymentNetworks,
   selectedNetwork,
-  ArtifactNotFoundError,
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
-import { loadValidationsFromDisk, missingLayoutReason } from "../internals/validations-cache.js";
-import { probe, resolveBaseline } from "../internals/baseline.js";
+import {
+  ArtifactNotFoundError,
+  createBuildAnalyzer,
+  type BuildAnalyzer,
+} from "../internals/build-analysis.js";
+import { baselineSide, probe, resolveBaseline } from "../internals/baseline.js";
 import { assertSameChain } from "../internals/chain-identity.js";
 import {
   artifactCodeLookup,
@@ -39,7 +35,6 @@ import {
   updateProxyIndex,
   type LocalCodeLookup,
 } from "../internals/proxy-discovery.js";
-import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import type { EthProvider } from "../../core/onchain/types.js";
 import { logger } from "../../utils/logger.js";
 
@@ -92,8 +87,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
   if (targetNetworks === null) return;
 
   let hasErrors = false;
-  const cache = createBuildInfoOutputCache();
-  const validations = await loadValidationsFromDisk(hre.config.paths.cache);
+  const analyze = createBuildAnalyzer(hre.artifacts, hre.solidity);
 
   for (const networkName of targetNetworks) {
     const deploymentsDir = resolve(deploymentsBase, networkName);
@@ -154,8 +148,7 @@ const action: NewTaskActionFunction<ValidateUpgradeArgs> = async (
             networkName,
             deploymentsDir,
             hre,
-            cache,
-            validations,
+            analyze,
             { provider, chain, discovered: all, localCode },
             options,
           );
@@ -205,8 +198,7 @@ async function validateContract(
   networkName: string,
   deploymentsDir: string,
   hre: HardhatRuntimeEnvironment,
-  cache: BuildInfoOutputCache,
-  validations: ValidationDataCurrent | undefined,
+  analyze: BuildAnalyzer,
   access: ChainAccess,
   options: ValidateOptions,
 ): Promise<ValidationResult | null> {
@@ -243,18 +235,9 @@ async function validateContract(
 
   const artifactName = resolveArtifactName(deployment, name);
 
-  let upgradeStorageLayout;
-  let safetyErrors;
-  let resolvedProxyKind: ProxyKind | undefined;
+  let next;
   try {
-    ({
-      upgradeStorageLayout,
-      safetyErrors,
-      proxyKind: resolvedProxyKind,
-    } = await getContractBuildData(artifactName, hre.artifacts, validations, cache, {
-      kind: options.kind,
-      unsafeAllow: options.unsafeAllow,
-    }));
+    next = await analyze(artifactName);
   } catch (err) {
     // A proxy whose new code is not compiled here cannot be checked: an error,
     // like in the compile hook. Any other error propagates (fails too).
@@ -262,18 +245,7 @@ async function validateContract(
     throw err;
   }
 
-  // The new side cannot be checked: an error, never a pass.
-  if (upgradeStorageLayout === undefined) {
-    throw new Error(`${artifactName}: ${missingLayoutReason(validations)}`);
-  }
-
-  const result = withSafetyErrors(
-    validateStorageUpgrade(name, baseline.layout, upgradeStorageLayout, {
-      ...options,
-      kind: resolvedProxyKind,
-    }),
-    safetyErrors,
-  );
+  const result = validateUpgrade(name, baselineSide(baseline), next, options);
   result.baseline = baseline.info;
   result.warnings.push(...baseline.warnings);
   return result;

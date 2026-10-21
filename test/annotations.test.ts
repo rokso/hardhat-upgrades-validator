@@ -7,48 +7,30 @@
  * `-retyped-from <oldType> <member>` on the struct), for both ERC-7201
  * namespace structs and plain structs.
  *
- * Uses committed compilation output from test/fixtures/ (real solc AST and
- * ValidationData). To regenerate the fixture output after changing contracts:
+ * Uses the fixture project's build info (test/fixtures/, real solc output),
+ * analyzed as the plugin does. To regenerate it after changing contracts:
  *   pnpm run fixtures
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { StorageLayout, ValidationDataCurrent } from "@openzeppelin/upgrades-core";
+import type { StorageLayout } from "@openzeppelin/upgrades-core";
 import {
-  getContractBuildData,
-  createBuildInfoOutputCache,
+  extractStructMemberAnnotations,
   type BuildInfoParsed,
-} from "../src/plugin/internals/deployment-utils.js";
-import { extractStructMemberAnnotations } from "../src/plugin/internals/annotation-utils.js";
-import { loadValidationsFromDisk } from "../src/plugin/internals/validations-cache.js";
-import { validateStorageUpgrade } from "../src/core/validator.js";
-import { makeFixtureArtifacts } from "./helpers/fixture-artifacts.js";
+} from "../src/plugin/internals/annotation-utils.js";
+import { validateStorageUpgrade, validateUpgrade } from "../src/core/validator.js";
+import { makeFixtureAnalyzer, makeFixtureArtifacts } from "./helpers/fixture-artifacts.js";
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
-const CACHE_DIR = join(FIXTURES_DIR, "cache");
 
 const artifacts = makeFixtureArtifacts(FIXTURES_DIR);
-
-let validations: ValidationDataCurrent | undefined;
-
-beforeAll(async () => {
-  validations = await loadValidationsFromDisk(CACHE_DIR);
-  if (!validations) {
-    throw new Error("Fixture validations.json not found. Run `pnpm run fixtures` to generate it.");
-  }
-});
+const analyze = makeFixtureAnalyzer(FIXTURES_DIR);
 
 async function layoutOf(contract: string): Promise<StorageLayout> {
-  const data = await getContractBuildData(
-    contract,
-    artifacts,
-    validations,
-    createBuildInfoOutputCache(),
-  );
-  return data.upgradeStorageLayout!;
+  return (await analyze(contract)).layout;
 }
 
 function structMembers(l: StorageLayout, structName: string) {
@@ -57,10 +39,10 @@ function structMembers(l: StorageLayout, structName: string) {
 }
 
 // ---------------------------------------------------------------------------
-// getContractBuildData
+// The analyzer: slotdiff's layout with our struct-member tags applied
 // ---------------------------------------------------------------------------
 
-describe("getContractBuildData", () => {
+describe("build analysis", () => {
   it("resolves V1 storage layout with all namespace members", async () => {
     const ns = (await layoutOf("V1")).namespaces?.["erc7201:upgrades.test.v1"];
     expect(ns?.map((m) => m.label)).toEqual(
@@ -141,6 +123,27 @@ describe("validateStorageUpgrade", () => {
     const text = result.storage!.explain(false);
     expect(text).toContain("newValue");
     expect(text).toContain("height");
+  });
+});
+
+describe("validateUpgrade with real analyses", () => {
+  // V1 is the deployed side, as a record made from its analysis would hold it.
+  const recorded = async (contract: string) => {
+    const { layout, namespaces, kind } = await analyze(contract);
+    return { layout, namespaces, kind };
+  };
+
+  it("accepts V1 -> V2, the struct-member tags included", async () => {
+    const result = validateUpgrade("V2", await recorded("V1"), await analyze("V2"));
+    expect(result.storage?.explain(false)).toBe("");
+    expect(result.namespaces?.result).toBe("pass");
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects V1 -> V2Broken", async () => {
+    const result = validateUpgrade("V2Broken", await recorded("V1"), await analyze("V2Broken"));
+    expect(result.ok).toBe(false);
+    expect(result.storage!.explain(false)).toContain("newValue");
   });
 });
 

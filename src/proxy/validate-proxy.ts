@@ -3,7 +3,7 @@
  *
  * The old layout is the layout of the implementation the proxy runs now, read
  * from the chain (offline: the proxy index's record), and the new layout comes
- * from the validations cache; neither needs to be passed.
+ * from the build info of the last compile; neither needs to be passed.
  *
  * Usage:
  *
@@ -21,11 +21,8 @@ import { resolve } from "node:path";
 
 import type { ProxyKind, UnsafeAllowKind, ValidationResult } from "../types/validation.js";
 import type { EthProvider } from "../core/onchain/types.js";
-import {
-  validateStorageUpgrade,
-  formatValidationResult,
-  withSafetyErrors,
-} from "../core/validator.js";
+import { formatValidationResult, validateUpgrade } from "../core/validator.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Thrown by `assertProxyUpgrade` when storage layout validation fails.
@@ -40,17 +37,16 @@ export class StorageLayoutError extends Error {
 import {
   readDeployment,
   readDeployments,
-  getContractBuildData,
-  createBuildInfoOutputCache,
   resolveArtifactName,
   selectedNetwork,
 } from "../plugin/internals/deployment-utils.js";
+import { createBuildAnalyzer } from "../plugin/internals/build-analysis.js";
 import {
-  loadValidationsFromDisk,
-  missingLayoutReason,
-} from "../plugin/internals/validations-cache.js";
-import { getInMemoryValidations } from "../plugin/hooks/compile.js";
-import { probe, resolveBaseline, type ResolvedBaseline } from "../plugin/internals/baseline.js";
+  baselineSide,
+  probe,
+  resolveBaseline,
+  type ResolvedBaseline,
+} from "../plugin/internals/baseline.js";
 import {
   artifactCodeLookup,
   discoverProxies,
@@ -63,9 +59,11 @@ export interface ProxyUpgradeOptions {
   /** Allow renamed variables without `@custom:oz-renamed-from` (OZ's `unsafeAllowRenames`). */
   unsafeAllowRenames?: boolean;
   /**
-   * The proxy kind, for OZ's safety rules. OZ infers it from the new
-   * implementation otherwise, which reads an implementation that dropped
-   * `upgradeTo` as "transparent": pass "uups" for a UUPS proxy.
+   * The proxy kind, for OZ's safety rules. Defaults to the baseline's (`beacon`
+   * when a beacon serves the proxy, else the kind its running implementation's
+   * code implies). Records made before 0.1.0-alpha.4 do not hold it, and the
+   * new implementation's code is used then, which reads an implementation that
+   * dropped `upgradeTo` as "transparent": pass "uups" for a UUPS proxy.
    */
   kind?: ProxyKind;
   unsafeSkipStorageCheck?: boolean;
@@ -117,22 +115,10 @@ async function resolveLayouts(
     );
   }
 
-  const validations =
-    getInMemoryValidations() ?? (await loadValidationsFromDisk(hre.config.paths.cache));
-
   const artifactName = options.newImpl ?? resolveArtifactName(deployment, contractName);
+  const next = await createBuildAnalyzer(hre.artifacts, hre.solidity)(artifactName);
 
-  const cache = createBuildInfoOutputCache();
-  const {
-    upgradeStorageLayout: newLayout,
-    safetyErrors,
-    proxyKind,
-  } = await getContractBuildData(artifactName, hre.artifacts, validations, cache, {
-    kind: options.kind,
-    unsafeAllow: options.unsafeAllow,
-  });
-
-  return { baseline, validations, newLayout, safetyErrors, proxyKind };
+  return { baseline, next };
 }
 
 // Opens a connection to the --network network unless the caller passed a
@@ -177,27 +163,14 @@ export async function validateProxyUpgrade(
   contractName: string,
   options: ProxyUpgradeOptions = {},
 ): Promise<ValidationResult> {
-  const { baseline, validations, newLayout, safetyErrors, proxyKind } = await resolveLayouts(
-    hre,
-    contractName,
-    options,
-  );
+  const { baseline, next } = await resolveLayouts(hre, contractName, options);
 
-  if (newLayout === undefined) {
-    throw new Error(
-      `[hardhat-upgrades-validator] No storage layout for "${contractName}": ${missingLayoutReason(validations)}`,
-    );
-  }
-
-  const result = withSafetyErrors(
-    validateStorageUpgrade(contractName, baseline.layout, newLayout, {
-      unsafeAllow: options.unsafeAllow,
-      unsafeAllowRenames: options.unsafeAllowRenames,
-      unsafeSkipStorageCheck: options.unsafeSkipStorageCheck,
-      kind: proxyKind,
-    }),
-    safetyErrors,
-  );
+  const result = validateUpgrade(contractName, baselineSide(baseline), next, {
+    unsafeAllow: options.unsafeAllow,
+    unsafeAllowRenames: options.unsafeAllowRenames,
+    unsafeSkipStorageCheck: options.unsafeSkipStorageCheck,
+    kind: options.kind,
+  });
   result.baseline = baseline.info;
   result.warnings.push(...baseline.warnings);
   return result;
@@ -209,6 +182,10 @@ export async function assertProxyUpgrade(
   options: ProxyUpgradeOptions = {},
 ): Promise<void> {
   const result = await validateProxyUpgrade(hre, contractName, options);
+  // A pass with caveats (an older record, an offline fallback) says so.
+  if (result.ok && result.warnings.length > 0) {
+    logger.warn(formatValidationResult(contractName, result).trimStart());
+  }
   if (!result.ok) {
     // formatValidationResult returns "\nStorageLayoutError: ...\n  [ERROR]..."
     // Strip "StorageLayoutError: <header>" so error.name provides "StorageLayoutError:".

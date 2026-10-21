@@ -31,8 +31,8 @@ const config: HardhatUserConfig = {
 
   solidity: {
     version: "0.8.24",
-    // The plugin asks solc for storageLayout and ast itself, added to
-    // whatever outputSelection you configure.
+    // The plugin asks solc for storageLayout, metadata and ast itself,
+    // added to whatever outputSelection you configure.
   },
 
   upgradesValidator: {
@@ -57,12 +57,13 @@ The plugin operates through four validation paths, all running the same OZ check
 | **`assertProxyUpgrade`**    | Scripts, CI, tests | Throws if storage is incompatible; typically used just before upgrading            |
 | **`validateProxyUpgrade`**  | Scripts, CI, tests | Same, returns a result instead of throwing                                         |
 
-Each path runs two OZ checks and fails on either. (The compile hook is the exception for a contract it cannot check, such as one missing from the validation cache: it names it as skipped and does not fail the build. The other paths fail.)
+Each path runs the same checks, through [slotdiff](https://github.com/rokso/slotdiff)'s `checkUpgrade`, and fails on any of them:
 
 - **Storage layout:** OZ's comparison of the baseline layout with the compiled one (`getStorageUpgradeReport`). Any change OZ reports fails the upgrade.
-- **Upgrade safety:** all of OZ's checks on the new implementation (`getErrors`): constructors, `delegatecall`, `selfdestruct`, immutables, inline assignments, linked libraries, initializers, and a missing `upgradeTo` for UUPS proxies. The proxy kind is inferred by OZ from the new implementation unless you pass `--proxy-kind` (task) or `kind` (proxy helpers). OZ infers `uups` only when the new implementation has `upgradeTo`, so **an implementation that drops `upgradeTo` (which bricks a UUPS proxy) is caught only when you pass the kind**; the compile hook cannot, since it has no kind setting.
+- **ERC-7201 namespaces by slot:** OZ matches namespaces by their `@custom:storage-location` annotation and never checks the `bytes32` slot the code assigns. Each namespace is paired by the slot the code really uses: a slot that moves under an unchanged annotation fails, and a corrected annotation over an unchanged slot passes (OZ alone reports that as a deleted namespace). This needs the slots of the baseline too, which records made by 0.1.0-alpha.4 or later hold; against an older record the namespaces are compared by annotation, as before, with a warning to record it again (`record-baseline --force`). A slot that cannot be read from the code (assigned from a function argument, say) fails: whether its storage moved cannot be known. So does a namespace missing from a record that has slots.
+- **Upgrade safety:** all of OZ's checks on the new implementation: constructors, `delegatecall`, `selfdestruct`, immutables, inline assignments, linked libraries, initializers, and a missing `upgradeTo` for UUPS proxies. The proxy kind is the one you pass (`--proxy-kind`, or `kind` in the proxy helpers), else the baseline's: `beacon` when a beacon serves the proxy, else the kind the **running** implementation's code implies. So an implementation that drops `upgradeTo` (which bricks a UUPS proxy) fails without any setting. Records made before 0.1.0-alpha.4 do not hold the kind, and the new implementation's code decides then, with a warning: pass the kind, or record the baseline again.
 
-The ValidationData cache (`cache/hardhat-upgrades-validator/validations-*.json`, named after the plugin's cache format and the upgrades-core version) is shared across all four paths so build-info files are parsed only once per compile. It is removed while a build runs and written back only when every compiled job was validated, so a failed or interrupted build forces a full recompile next time instead of leaving contracts out. A contract missing from the cache fails `validate-upgrade`, `record-baseline` and the proxy helpers; the compile hook names it as skipped.
+The new side comes from the build info of the last compile (`artifacts/build-info/`), analyzed once per build info by slotdiff's `analyzeBuild` without compiling again. It is read from disk when a check runs, so contracts Hardhat kept from an earlier build count as much as freshly compiled ones. A contract whose build info cannot be analyzed fails every path, the compile hook included. Build info written before this plugin version lacks the metadata the analysis needs; Hardhat rebuilds it on its own after the upgrade, since the requested outputs change, and otherwise the error says to run `hardhat compile --force`.
 
 ### Where the baseline comes from
 
@@ -211,9 +212,8 @@ All options are optional. `networks` and `enableCompileHook` apply to the compil
 
 ```ts
 upgradesValidator: {
-  // Enables the compile hook: namespaced compilation pass, ValidationData cache,
-  // and auto-validation of every indexed proxy after each compile.
-  // Set to false to disable the hook (a build then removes the cache).
+  // Enables the compile hook: auto-validation of every indexed proxy after
+  // each successful compile. Set to false to disable it.
   enableCompileHook: true,
 
   // Networks to validate during `hardhat compile`.
@@ -241,7 +241,7 @@ upgradesValidator: {
 },
 ```
 
-The compile hook's second, namespaced compilation goes through Hardhat's `compileBuildInfo`, which for solc downloads the compiler by version: a compiler `path` configured for the project is not used, so an offline machine with a custom compiler fails that pass (and the build). Other compiler types (solx, for example) need Hardhat 3.10 or later for it.
+The analysis's second, namespaced compilation (one per build info) goes through Hardhat's `compileBuildInfo`, which for solc downloads the compiler by version: a compiler `path` configured for the project is not used, so an offline machine with a custom compiler fails that pass (and the check). Other compiler types (solx, for example) need Hardhat 3.10 or later for it.
 
 Only standard-json verifications can be rebuilt: flattened and multi-file verifications do not record every compiler setting (`viaIR` among them). For those implementations, record the layout with `record-baseline` from a matching local build.
 
@@ -288,7 +288,7 @@ npx hardhat validate-upgrade --all --unsafe-skip-storage-check   # emergency esc
 | `--unsafe-skip-storage-check` | Skip all storage checks (emits a loud warning)        |
 | `--proxy-kind <kind>`         | Override proxy kind (`transparent`, `uups`, `beacon`) |
 
-The task fails (exit code 1) when a proxy cannot be checked: no baseline can be found for it, its artifact is missing, or it is missing from the validation cache. A deployment is skipped only on positive knowledge: the chain shows it is not a proxy, or that the file describes the proxy contract itself, or (offline) the proxy index lists another file for its proxy. Offline, `--all` names the deployments the index does not cover, which it cannot classify.
+The task fails (exit code 1) when a proxy cannot be checked: no baseline can be found for it, its artifact is missing, or its build info cannot be analyzed. A deployment is skipped only on positive knowledge: the chain shows it is not a proxy, or that the file describes the proxy contract itself, or (offline) the proxy index lists another file for its proxy. Offline, `--all` names the deployments the index does not cover, which it cannot classify.
 
 ## Proxy helper API
 
@@ -304,7 +304,7 @@ import {
 
 ### `assertProxyUpgrade(hre, contractName, options?)`
 
-Throws `StorageLayoutError` if the upgrade is storage-incompatible. Use this inside deploy scripts to abort before touching the chain.
+Throws `StorageLayoutError` if the upgrade is storage-incompatible, and prints the caveats of a pass (an older record, an offline fallback). Use this inside deploy scripts to abort before touching the chain.
 
 ```ts
 await assertProxyUpgrade(hre, "MyToken");
@@ -343,7 +343,7 @@ if (!result.ok) {
 | `unsafeAllowRenames`     | `boolean`           | Allow renames without `@custom:oz-renamed-from` (OZ's option)                                                                                   |
 | `unsafeSkipStorageCheck` | `boolean`           | Skip all storage checks                                                                                                                         |
 | `newImpl`                | `string`            | Validate against a different compiled artifact instead of the one recorded in the deployment JSON                                               |
-| `kind`                   | `ProxyKind`         | `"transparent"`, `"uups"` or `"beacon"`; pass `"uups"` so a dropped `upgradeTo` is caught                                                       |
+| `kind`                   | `ProxyKind`         | `"transparent"`, `"uups"` or `"beacon"`; defaults to the baseline's (see [How it works](#how-it-works))                                         |
 | `provider`               | `EthProvider`       | Provider to read the chain with. Defaults to a new connection to the `--network` network; pass the deploy script's own on an in-process network |
 
 ## unsafe-allow kinds
@@ -358,14 +358,14 @@ if (!result.ok) {
 | `state-variable-immutable`    | An immutable variable                                                 |
 | `state-variable-assignment`   | A state variable assigned at declaration                              |
 | `external-library-linking`    | A linked external library                                             |
-| `struct-definition`           | Deprecated by OZ; structs are checked automatically                   |
-| `enum-definition`             | Deprecated by OZ; enums are checked automatically                     |
 | `internal-function-storage`   | An internal function pointer stored in storage                        |
 | `missing-public-upgradeto`    | A UUPS implementation without a public `upgradeTo`/`upgradeToAndCall` |
 | `missing-initializer`         | No initializer although a parent has one                              |
 | `missing-initializer-call`    | An initializer that does not call a parent's initializer              |
 | `duplicate-initializer-call`  | An initializer that calls a parent's initializer twice                |
 | `incorrect-initializer-order` | Parent initializers called out of order (OZ reports it as a warning)  |
+
+OZ's deprecated `struct-definition` and `enum-definition` are not accepted: OZ never reports them.
 
 Storage layout changes have no kind: approve each one with a tag (below), or use `unsafeAllowRenames` for renames. Prefer the scoped `@custom:oz-upgrades-unsafe-allow` tag over a call-wide `unsafeAllow`.
 
@@ -442,7 +442,12 @@ Commit them: they are reviewable in PRs and let CI validate without an explorer 
   "bytecodeMatch": "immutables-only", // exact | immutables-only
   "source": "explorer", // explorer | local-compile
   "recordedAt": "2026-10-07T00:00:00.000Z",
-  "layout": { "storage": [...], "types": {...}, "namespaces": {...} }
+  "layout": { "storage": [...], "types": {...}, "namespaces": {...} },
+  "kind": "uups", // the proxy kind this code implies; absent in records before 0.1.0-alpha.4
+  "namespaces": [
+    // the slot each ERC-7201 namespace really uses; absent in records before 0.1.0-alpha.4
+    { "namespace": "erc7201:my.token", "expected": "0x…", "actual": "0x…", "status": "match" },
+  ],
 }
 ```
 

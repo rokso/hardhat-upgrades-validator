@@ -5,9 +5,10 @@ import type {
   UpgradesValidatorUserConfig,
 } from "../../types/hardhat-type-extensions.js";
 
-// What oz-core's validate() needs from solc beyond Hardhat's defaults (the
-// same outputs @openzeppelin/hardhat-upgrades requests).
-const REQUIRED_CONTRACT_OUTPUTS = ["storageLayout"];
+// What slotdiff's analyzeBuild needs from solc beyond Hardhat's defaults:
+// OpenZeppelin's (storage layout, ASTs) and the metadata that proves the
+// output was compiled from the build's sources.
+const REQUIRED_CONTRACT_OUTPUTS = ["storageLayout", "metadata"];
 const REQUIRED_FILE_OUTPUTS = ["ast"];
 
 export default async (): Promise<Partial<ConfigHooks>> => {

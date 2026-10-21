@@ -2,10 +2,29 @@
 
 ## Unreleased
 
+Every check now runs through slotdiff's `checkUpgrade`, the same one its CLI runs; this plugin keeps the Hardhat and hardhat-deploy side.
+
+### Added
+
+- ERC-7201 namespaces are compared by the slot the code really uses, not only by the annotation: a namespace whose slot moves under an unchanged annotation fails, and a corrected annotation over an unchanged slot passes, where OpenZeppelin alone reports a deleted namespace. Needs the slots of the baseline, which new records hold (below). A slot that cannot be read from the code fails, since whether its storage moved cannot be known.
+- Layout records also hold the proxy kind the implementation's code implies and the slot of each namespace. Older records still load; against them the namespaces are compared by annotation, with a warning to record them again (`record-baseline --force`). A namespace missing from a record that has slots fails.
+
 ### Changed
+
+- The proxy kind for the safety rules is the baseline's, not the new implementation's: `beacon` when a beacon serves the proxy, else the kind the running implementation's code implies. An implementation that drops `upgradeTo` from a UUPS proxy now fails without `--proxy-kind uups` (for records made before this version the new code's kind is used, with a warning: pass it or record again). `--proxy-kind` and `kind` still override.
+- The new side is read from the build info of the last compile and analyzed by slotdiff (`analyzeBuild`, no second full compile), instead of from a validations cache the compile hook filled. The cache, its file locking, the forced full recompile when it was missing, and the lookup by bytecode are gone, and with them the ways a build could leave contracts out of it. A contract whose build info cannot be analyzed fails every path, the compile hook included (it used to be skipped there).
+- `assertProxyUpgrade` prints the warnings of a pass (an older record, an offline fallback) instead of dropping them.
+- The exported `validateStorageUpgrade` is documented as what it is: OpenZeppelin's layout comparison alone, without the safety rules or the namespace slots the plugin's own checks add.
+- The plugin also asks solc for `metadata`, which the analysis needs. Hardhat rebuilds on its own after the upgrade; build info that still lacks it fails with a hint to run `hardhat compile --force`.
 
 - Depends on slotdiff 0.3.1 (was 0.1.0-alpha.1), which brings its fixes to rebuilding layouts from verified source (`record-baseline --from-chain`, and validation with an explorer configured): explorer errors no longer quote the request URL, which could carry the API key; solc runs in an empty directory, so verified source cannot import a file from yours; control characters in explorer and compiler text are stripped; and storage at a fixed slot outside the contract's ERC-7201 namespaces is refused instead of passing unchecked.
 - Requires Node.js 22.13 or later (was 22), as slotdiff does.
+
+### Breaking (alpha)
+
+- `unsafeAllow` / `--unsafe-allow` no longer accept `struct-definition` and `enum-definition`, OpenZeppelin's deprecated kinds that it never reports.
+- `ValidationResult` has `namespaces` (slotdiff's `NamespaceCheck`), and its warnings a `namespaces-unchecked` kind. Its `safetyErrors` keep their shape.
+- `cache/hardhat-upgrades-validator/` is no longer written or read; delete it.
 
 ### Fixed
 

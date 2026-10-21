@@ -6,56 +6,33 @@
  * makes the same changes without tags and must fail, so a pass on OzV2 means
  * the tags were honored, not that nothing was checked.
  *
- * Uses the compiled fixtures (real solc output and the compile hook's
- * ValidationData). Regenerate with `pnpm run fixtures`.
+ * Uses the fixture project's build info (real solc output), analyzed as the
+ * plugin does. Regenerate with `pnpm run fixtures`.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
-import {
-  getContractBuildData,
-  createBuildInfoOutputCache,
-} from "../src/plugin/internals/deployment-utils.js";
-import { loadValidationsFromDisk } from "../src/plugin/internals/validations-cache.js";
-import { validateStorageUpgrade, withSafetyErrors } from "../src/core/validator.js";
-import type { ProxyKind } from "../src/types/validation.js";
-import { makeFixtureArtifacts } from "./helpers/fixture-artifacts.js";
+import { validateUpgrade } from "../src/core/validator.js";
+import type { ProxyKind, UnsafeAllowKind } from "../src/types/validation.js";
+import { makeFixtureAnalyzer } from "./helpers/fixture-artifacts.js";
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
-const artifacts = makeFixtureArtifacts(FIXTURES_DIR);
+const analyze = makeFixtureAnalyzer(FIXTURES_DIR);
 
-let validations: ValidationDataCurrent | undefined;
-
-beforeAll(async () => {
-  validations = await loadValidationsFromDisk(join(FIXTURES_DIR, "cache"));
-  if (!validations) {
-    throw new Error("Fixture validations.json not found. Run `pnpm run fixtures` to generate it.");
-  }
-});
-
-async function check(newContract: string) {
-  const cache = createBuildInfoOutputCache();
-  const old = await getContractBuildData("OzV1", artifacts, validations, cache);
-  const next = await getContractBuildData(newContract, artifacts, validations, cache);
-  return withSafetyErrors(
-    validateStorageUpgrade(newContract, old.upgradeStorageLayout, next.upgradeStorageLayout!, {
-      kind: next.proxyKind,
-    }),
-    next.safetyErrors,
-  );
+// The deployed side, as a record made from its analysis holds it.
+async function recorded(contract: string) {
+  const { layout, namespaces, kind } = await analyze(contract);
+  return { layout, namespaces, kind };
 }
 
-async function safetyKinds(contract: string, kind?: ProxyKind) {
-  const data = await getContractBuildData(
-    contract,
-    artifacts,
-    validations,
-    createBuildInfoOutputCache(),
-    { kind },
-  );
-  return data.safetyErrors.map((e) => e.kind);
+async function check(newContract: string) {
+  return validateUpgrade(newContract, await recorded("OzV1"), await analyze(newContract));
+}
+
+async function safetyKinds(contract: string, kind?: ProxyKind, unsafeAllow?: UnsafeAllowKind[]) {
+  const next = await analyze(contract);
+  return next.safety({ kind: kind ?? next.kind, unsafeAllow }).errors.map((e) => e.kind);
 }
 
 describe("OZ-native tags", () => {
@@ -86,14 +63,24 @@ describe("OZ checks beyond the original six", () => {
   });
 
   it("infers uups from an implementation that has upgradeToAndCall", async () => {
-    const data = await getContractBuildData(
-      "UupsImpl",
-      artifacts,
-      validations,
-      createBuildInfoOutputCache(),
-    );
-    expect(data.proxyKind).toBe("uups");
-    expect(data.safetyErrors).toEqual([]);
+    const next = await analyze("UupsImpl");
+    expect(next.kind).toBe("uups");
+    expect(await safetyKinds("UupsImpl")).toEqual([]);
+  });
+
+  it("takes the proxy kind from the baseline: dropping upgradeTo from a UUPS proxy fails", async () => {
+    // OzV1 has no upgrade function, so its own code reads as transparent and
+    // would pass; the running implementation (UupsImpl) makes the proxy UUPS.
+    const result = validateUpgrade("OzV1", await recorded("UupsImpl"), await analyze("OzV1"));
+    expect(result.ok).toBe(false);
+    expect(result.safetyErrors.map((e) => e.kind)).toContain("missing-public-upgradeto");
+  });
+
+  it("an explicit kind overrides the baseline's", async () => {
+    const result = validateUpgrade("OzV1", await recorded("UupsImpl"), await analyze("OzV1"), {
+      kind: "transparent",
+    });
+    expect(result.safetyErrors.map((e) => e.kind)).not.toContain("missing-public-upgradeto");
   });
 
   it("does not require upgradeTo for transparent proxies", async () => {
@@ -111,13 +98,10 @@ describe("OZ checks beyond the original six", () => {
   });
 
   it("allows an OZ error kind through unsafeAllow", async () => {
-    const data = await getContractBuildData(
-      "contracts/InitChecks.sol:InitMissingCall",
-      artifacts,
-      validations,
-      createBuildInfoOutputCache(),
-      { unsafeAllow: ["missing-initializer-call"] },
-    );
-    expect(data.safetyErrors).toEqual([]);
+    expect(
+      await safetyKinds("contracts/InitChecks.sol:InitMissingCall", undefined, [
+        "missing-initializer-call",
+      ]),
+    ).toEqual([]);
   });
 });

@@ -21,15 +21,17 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types/hre";
 import { resolve } from "node:path";
 
 import {
-  getContractBuildData,
-  createBuildInfoOutputCache,
   readDeployments,
   resolveArtifactName,
   resolveDeploymentNetworks,
   selectedNetwork,
-  ArtifactNotFoundError,
   type DeploymentFile,
 } from "../internals/deployment-utils.js";
+import {
+  ArtifactNotFoundError,
+  createBuildAnalyzer,
+  type BuildAnalyzer,
+} from "../internals/build-analysis.js";
 import {
   artifactCodeLookup,
   discoverProxies,
@@ -39,10 +41,8 @@ import {
   type DiscoveryError,
   type LocalCodeLookup,
 } from "../internals/proxy-discovery.js";
-import { loadValidationsFromDisk, missingLayoutReason } from "../internals/validations-cache.js";
 import { explorerConfig, probe } from "../internals/baseline.js";
 import { assertSameChain } from "../internals/chain-identity.js";
-import type { ValidationDataCurrent } from "@openzeppelin/upgrades-core";
 import { recordLocalBuild, resolveImplementationLayout } from "../../core/onchain/baseline.js";
 import { layoutStoreDir, readLayoutRecord } from "../../core/onchain/store.js";
 import type { EthProvider } from "../../core/onchain/types.js";
@@ -76,8 +76,7 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
   let totalRecorded = 0;
   let totalSkipped = 0;
   let anyFailed = false;
-  const cache = createBuildInfoOutputCache();
-  const validations = await loadValidationsFromDisk(hre.config.paths.cache);
+  const analyze = createBuildAnalyzer(hre.artifacts, hre.solidity);
 
   for (const networkName of targetNetworks) {
     const deploymentsDir = resolve(deploymentsBase, networkName);
@@ -143,7 +142,7 @@ const action: NewTaskActionFunction<RecordBaselineArgs> = async (
             deploymentsDir,
             networkName,
             hre,
-            { provider: provider!, cache, validations, force, fromChain },
+            { provider: provider!, analyze, force, fromChain },
           );
           if (outcome === "recorded") totalRecorded++;
           else totalSkipped++;
@@ -227,8 +226,7 @@ async function recordBaseline(
   hre: HardhatRuntimeEnvironment,
   ctx: {
     provider: EthProvider;
-    cache: ReturnType<typeof createBuildInfoOutputCache>;
-    validations: ValidationDataCurrent | undefined;
+    analyze: BuildAnalyzer;
     force: boolean;
     fromChain: boolean;
   },
@@ -254,15 +252,10 @@ async function recordBaseline(
   }
 
   const artifactName = resolveArtifactName(deployment, name);
-  let layout;
+  let analysis;
   let artifact;
   try {
-    ({ upgradeStorageLayout: layout } = await getContractBuildData(
-      artifactName,
-      hre.artifacts,
-      ctx.validations,
-      ctx.cache,
-    ));
+    analysis = await ctx.analyze(artifactName);
     artifact = (await hre.artifacts.readArtifact(artifactName)) as {
       contractName: string;
       sourceName: string;
@@ -280,13 +273,11 @@ async function recordBaseline(
     throw err;
   }
 
-  if (layout === undefined) {
-    throw new Error(`${artifactName}: ${missingLayoutReason(ctx.validations)}`);
-  }
-
   const { bytecodeMatch, record } = await recordLocalBuild(ctx.provider, storeDir, implementation, {
     contract: `${artifact.sourceName}:${artifact.contractName}`,
-    layout,
+    layout: analysis.layout,
+    kind: analysis.kind,
+    namespaces: analysis.namespaces,
     deployedBytecode: artifact.deployedBytecode,
     immutableReferences: artifact.immutableReferences,
   });

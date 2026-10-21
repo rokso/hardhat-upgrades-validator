@@ -8,17 +8,15 @@ import { join } from "node:path";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
-  return { ...orig, getContractBuildData: vi.fn() };
-});
+const analyze = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/plugin/hooks/compile.js", () => ({
-  getInMemoryValidations: vi.fn().mockReturnValue(null),
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: () => analyze,
 }));
 
 import { validateProxyUpgrade } from "../src/proxy/validate-proxy.js";
-import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import { fakeAnalysis } from "./helpers/analysis.js";
 import { readProxyEntry, writeLayoutRecord } from "../src/core/onchain/store.js";
 import { codeSha256 } from "./helpers/code-hash.js";
 import { makeMockChain } from "./helpers/mock-chain.js";
@@ -51,6 +49,18 @@ function makeHre(provider: { send: unknown }) {
   };
 }
 
+const record = () => ({
+  format: 1 as const,
+  address: IMPL,
+  chainId: 1,
+  codeSha256: codeSha256(LOGIC_CODE),
+  contract: "src/Box.sol:Box",
+  bytecodeMatch: "exact" as const,
+  source: "local-compile" as const,
+  recordedAt: "2026-01-01T00:00:00.000Z",
+  layout: layout as never,
+});
+
 beforeEach(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hhuv-vpchain-"));
   deploymentsDir = join(tmpDir, "deployments", "mainnet");
@@ -66,11 +76,7 @@ beforeEach(async () => {
     }),
   );
   vi.clearAllMocks();
-  vi.mocked(getContractBuildData).mockResolvedValue({
-    upgradeStorageLayout: layout,
-    safetyErrors: [],
-    proxyKind: undefined,
-  } as never);
+  analyze.mockResolvedValue(fakeAnalysis(layout));
 });
 
 afterEach(async () => {
@@ -99,6 +105,43 @@ describe("validateProxyUpgrade on a chain", () => {
       implementation: IMPL,
       deployments: ["Box"],
     });
+  });
+
+  it("checks the safety rules with the kind the running implementation's record holds", async () => {
+    await writeLayoutRecord(storeDir(), { ...record(), kind: "uups" });
+    // The new code alone reads as transparent: it lost its upgrade function.
+    const next = fakeAnalysis(layout, { kind: "transparent" });
+    analyze.mockResolvedValue(next);
+
+    await validateProxyUpgrade(makeHre(chain()) as never, "Box");
+
+    expect(next.safetyKinds).toEqual(["uups"]);
+  });
+
+  it("checks a beacon proxy as a beacon, whatever the record's code implies", async () => {
+    const BEACON = "0x00000000000000000000000000000000000000cc";
+    await writeLayoutRecord(storeDir(), { ...record(), kind: "uups" });
+    const next = fakeAnalysis(layout);
+    analyze.mockResolvedValue(next);
+    const beaconChain = makeMockChain({
+      code: { [PROXY]: PROXY_CODE, [IMPL]: LOGIC_CODE, [BEACON]: PROXY_CODE },
+      beacons: { [PROXY]: BEACON },
+      beaconImplementations: { [BEACON]: IMPL },
+    });
+
+    await validateProxyUpgrade(makeHre(beaconChain) as never, "Box");
+
+    expect(next.safetyKinds).toEqual(["beacon"]);
+  });
+
+  it("falls back to the new code's kind for a record without one", async () => {
+    await writeLayoutRecord(storeDir(), record());
+    const next = fakeAnalysis(layout, { kind: "uups" });
+    analyze.mockResolvedValue(next);
+
+    await validateProxyUpgrade(makeHre(chain()) as never, "Box");
+
+    expect(next.safetyKinds).toEqual(["uups"]);
   });
 
   it("throws when the implementation the proxy runs has no record and no explorer", async () => {

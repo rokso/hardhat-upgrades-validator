@@ -10,23 +10,20 @@ vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) =>
   return {
     ...orig,
     readDeployment: vi.fn(),
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
     resolveArtifactName: vi.fn().mockImplementation((_: unknown, name: string) => name),
   };
 });
 
-vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
-}));
+const analyze = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/plugin/hooks/compile.js", () => ({
-  getInMemoryValidations: vi.fn().mockReturnValue(null),
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: () => analyze,
 }));
 
 import { validateProxyUpgrade, assertProxyUpgrade } from "../src/proxy/validate-proxy.js";
-import { readDeployment, getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import { readDeployment } from "../src/plugin/internals/deployment-utils.js";
+import { fakeAnalysis, type FakeAnalysisOptions } from "./helpers/analysis.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -95,12 +92,10 @@ function makeHre(network = "localhost") {
   };
 }
 
-function mockBuildData(newLayout: StorageLayout | undefined) {
-  vi.mocked(getContractBuildData).mockResolvedValue({
-    upgradeStorageLayout: newLayout,
-    safetyErrors: [],
-    proxyKind: undefined,
-  } as never);
+function mockBuildData(newLayout: StorageLayout, options?: FakeAnalysisOptions) {
+  const analysis = fakeAnalysis(newLayout, options);
+  analyze.mockResolvedValue(analysis);
+  return analysis;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,11 +118,11 @@ describe("validateProxyUpgrade", () => {
     );
   });
 
-  it("passes kind to OZ's getErrors via getContractBuildData", async () => {
+  it("passes kind to OZ's safety check", async () => {
     vi.mocked(readDeployment).mockResolvedValue(null);
-    mockBuildData(layout);
+    const analysis = mockBuildData(layout);
     await validateProxyUpgrade(makeHre() as never, "MyContract", { kind: "uups" });
-    expect(vi.mocked(getContractBuildData).mock.lastCall![4]).toMatchObject({ kind: "uups" });
+    expect(analysis.safetyKinds).toEqual(["uups"]);
   });
 
   it("returns ok for a backward-compatible upgrade (append only)", async () => {
@@ -175,15 +170,14 @@ describe("validateProxyUpgrade", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("passes unsafeAllow to OZ's getErrors via getContractBuildData", async () => {
+  it("passes unsafeAllow to OZ's safety check", async () => {
     vi.mocked(readDeployment).mockResolvedValue(null);
-    mockBuildData(layout);
-    await validateProxyUpgrade(makeHre() as never, "MyContract", {
+    mockBuildData(layout, { safetyErrors: [{ kind: "constructor", src: "contracts/A.sol:1" }] });
+    expect((await validateProxyUpgrade(makeHre() as never, "MyContract")).ok).toBe(false);
+    const result = await validateProxyUpgrade(makeHre() as never, "MyContract", {
       unsafeAllow: ["constructor"],
     });
-    expect(vi.mocked(getContractBuildData).mock.lastCall![4]).toEqual({
-      unsafeAllow: ["constructor"],
-    });
+    expect(result.ok).toBe(true);
   });
 
   it("fails on a safety error from OZ even when storage is compatible", async () => {
@@ -191,11 +185,10 @@ describe("validateProxyUpgrade", () => {
       address: "0xold",
       upgradeStorageLayout: layout,
     } as never);
-    vi.mocked(getContractBuildData).mockResolvedValue({
-      upgradeStorageLayout: layoutWithNewVar,
+    mockBuildData(layoutWithNewVar, {
+      kind: "uups",
       safetyErrors: [{ kind: "missing-public-upgradeto", src: "contracts/A.sol:1" }],
-      proxyKind: "uups",
-    } as never);
+    });
     const result = await validateProxyUpgrade(makeHre() as never, "MyContract");
     expect(result.ok).toBe(false);
     expect(result.safetyErrors.map((e) => e.kind)).toEqual(["missing-public-upgradeto"]);
@@ -233,11 +226,13 @@ describe("validateProxyUpgrade", () => {
     );
   });
 
-  it("throws when new layout is not in validation cache", async () => {
+  it("throws when the build info cannot be analyzed", async () => {
     vi.mocked(readDeployment).mockResolvedValue(null);
-    mockBuildData(undefined);
+    analyze.mockRejectedValue(
+      new Error("build info x lacks output: run `hardhat compile --force`."),
+    );
     await expect(validateProxyUpgrade(makeHre() as never, "MyContract")).rejects.toThrow(
-      /hardhat compile/,
+      /hardhat compile --force/,
     );
   });
 });
@@ -247,6 +242,21 @@ describe("validateProxyUpgrade", () => {
 // ---------------------------------------------------------------------------
 
 describe("assertProxyUpgrade", () => {
+  it("prints the caveats of a pass (here: the deprecated baseline)", async () => {
+    vi.mocked(readDeployment).mockResolvedValue({
+      address: "0xold",
+      upgradeStorageLayout: layout,
+    } as never);
+    mockBuildData(layoutWithNewVar);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await assertProxyUpgrade(makeHre() as never, "MyContract");
+      expect(warn.mock.calls.flat().join("\n")).toMatch(/deprecated upgradeStorageLayout field/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("does not throw for a safe upgrade", async () => {
     vi.mocked(readDeployment).mockResolvedValue({
       address: "0xold",

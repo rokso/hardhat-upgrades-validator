@@ -8,26 +8,15 @@ import { join } from "node:path";
 import { cp, mkdtemp, readFile, readdir, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-vi.mock("../src/plugin/internals/deployment-utils.js", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("../src/plugin/internals/deployment-utils.js")>();
-  return {
-    ...orig,
-    getContractBuildData: vi.fn(),
-    createBuildInfoOutputCache: vi.fn().mockReturnValue({}),
-  };
-});
+const analyze = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/plugin/hooks/compile.js", () => ({
-  getInMemoryValidations: vi.fn().mockReturnValue(null),
-}));
-
-vi.mock("../src/plugin/internals/validations-cache.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/plugin/internals/validations-cache.js")>()),
-  loadValidationsFromDisk: vi.fn().mockResolvedValue(undefined),
+vi.mock("../src/plugin/internals/build-analysis.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/plugin/internals/build-analysis.js")>()),
+  createBuildAnalyzer: () => analyze,
 }));
 
 import deployOverride from "../src/plugin/hooks/deploy.js";
-import { getContractBuildData } from "../src/plugin/internals/deployment-utils.js";
+import { fakeAnalysis } from "./helpers/analysis.js";
 import { readDeployments, type DeploymentFile } from "../src/plugin/internals/deployment-files.js";
 import { discoverProxies } from "../src/plugin/internals/proxy-discovery.js";
 import { compareDeployedBytecode } from "../src/core/bytecode-utils.js";
@@ -154,7 +143,7 @@ describe("deploy hook on real hardhat-deploy v2 output", () => {
     deploymentsDir = join(tmpDir, "deployments", "localhost");
     await mkdir(deploymentsDir, { recursive: true });
     vi.clearAllMocks();
-    vi.mocked(getContractBuildData).mockResolvedValue({ upgradeStorageLayout: layout } as never);
+    analyze.mockResolvedValue(fakeAnalysis(layout));
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });

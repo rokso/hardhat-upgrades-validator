@@ -2,10 +2,14 @@
  * Thin mock of Hardhat's ArtifactManager for use in Layer 2 tests.
  *
  * Reads from the committed fixture output in test/fixtures/artifacts/.
- * Three methods mirror HardhatRuntimeEnvironment["artifacts"]:
+ * Four methods mirror HardhatRuntimeEnvironment["artifacts"]:
  *   - readArtifact(name)          → { bytecode, sourceName, contractName }
  *   - getBuildInfoId(name)        → string | undefined
+ *   - getBuildInfoPath(id)        → absolute path to the build-info .json file
  *   - getBuildInfoOutputPath(id)  → absolute path to the .output.json file
+ *
+ * `makeFixtureAnalyzer` analyzes that build info as the plugin does, with
+ * slotdiff's native solc standing in for Hardhat's build system.
  *
  * Artifact path structure (Hardhat v3):
  *   artifacts/{sourceName}/{contractName}.json
@@ -17,7 +21,13 @@
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ArtifactsReader } from "../../src/plugin/internals/deployment-utils.js";
+import { getSolc, type SolcInput } from "slotdiff";
+import {
+  createBuildAnalyzer,
+  type BuildAnalyzer,
+  type BuildArtifacts,
+  type BuildCompilerHost,
+} from "../../src/plugin/internals/build-analysis.js";
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -48,7 +58,7 @@ function artifactPath(fixturesDir: string, contractNameOrFQN: string): string {
 
 export function makeFixtureArtifacts(
   fixturesDir: string = FIXTURES_DIR,
-): ArtifactsReader & { readArtifact(name: string): Promise<FixtureArtifact> } {
+): BuildArtifacts & { readArtifact(name: string): Promise<FixtureArtifact> } {
   const artifactCache = new Map<string, FixtureArtifact>();
 
   async function loadArtifact(name: string): Promise<FixtureArtifact> {
@@ -70,10 +80,26 @@ export function makeFixtureArtifacts(
       return artifact.buildInfoId;
     },
 
+    async getBuildInfoPath(buildInfoId) {
+      return join(fixturesDir, "artifacts", "build-info", `${buildInfoId}.json`);
+    },
+
     async getBuildInfoOutputPath(buildInfoId) {
       const outputPath = join(fixturesDir, "artifacts", "build-info", `${buildInfoId}.output.json`);
       // Return the path unconditionally; tests commit the output files.
       return outputPath;
     },
   };
+}
+
+/** Compiles a build info with slotdiff's native solc, as Hardhat's `compileBuildInfo` would. */
+export const nativeSolc: BuildCompilerHost = {
+  async compileBuildInfo(buildInfo) {
+    const solc = await getSolc(buildInfo.solcLongVersion);
+    return solc.compile(buildInfo.input as unknown as SolcInput);
+  },
+};
+
+export function makeFixtureAnalyzer(fixturesDir: string = FIXTURES_DIR): BuildAnalyzer {
+  return createBuildAnalyzer(makeFixtureArtifacts(fixturesDir), nativeSolc);
 }

@@ -13,8 +13,13 @@
 // structs (keyed by `@custom:storage-location`).
 
 import { astDereferencer } from "solidity-ast/utils.js";
-import type { BuildInfoParsed } from "./build-info-utils.js";
 import type { StorageLayout } from "@openzeppelin/upgrades-core";
+
+/** The parts of a compiler output the tags are read from: the source ASTs. */
+export interface BuildInfoParsed {
+  contracts: Record<string, unknown>;
+  sources: Record<string, { ast?: unknown }>;
+}
 
 const ANNOTATION_PREFIX = "upgrades-validator";
 
