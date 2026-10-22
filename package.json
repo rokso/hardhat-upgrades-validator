@@ -53,10 +53,10 @@
     "globals": "^17.5.0",
     "hardhat": "^3.18.1",
     "prettier": "^3.8.2",
-    "typescript": "^5.7.0",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.58.2",
     "vite": "^8.3.5",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.5"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -79,7 +79,7 @@
   "dependencies": {
     "@nomicfoundation/slang": "^1.3.4",
     "@openzeppelin/upgrades-core": "^1.46.0",
-    "chalk": "^5.6.2",
+    "chalk": "^6.0.1",
     "slotdiff": "^0.3.1",
     "solidity-ast": "^0.4.62"
   }
