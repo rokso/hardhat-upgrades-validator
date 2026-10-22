@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 Every check now runs through slotdiff's `checkUpgrade`, the same one its CLI runs; this plugin keeps the Hardhat and hardhat-deploy side.
 
@@ -30,7 +30,7 @@ Every check now runs through slotdiff's `checkUpgrade`, the same one its CLI run
 
 - A build without a metadata hash (`bytecodeHash: "none"` or `appendCBOR: false`) now says that is why its layout is not recorded. `record-baseline` said the source had moved on and pointed at `--from-chain`, which refuses such builds too, and the deploy hook said nothing.
 
-## 0.1.0-alpha.3 (2026-10-13)
+## 0.1.0-alpha.3
 
 The baseline is now what each proxy runs on chain.
 
@@ -59,7 +59,7 @@ The baseline is now what each proxy runs on chain.
 - The deploy hook and `record-baseline` write records and the proxy index, not `upgradeStorageLayout`. The field is deprecated and read only as an offline fallback, with a warning. `record-baseline` needs an RPC.
 - `validate-upgrade --all` covers every proxy found on the chain (offline: in the proxy index).
 
-## 0.1.0-alpha.2 (2026-10-08)
+## 0.1.0-alpha.2
 
 All checks, tags and error messages are now OpenZeppelin's. This plugin keeps the baseline and one annotation for struct members.
 
@@ -85,7 +85,7 @@ All checks, tags and error messages are now OpenZeppelin's. This plugin keeps th
 - An existing deployment without a baseline now fails; run `record-baseline` once for it.
 - `ValidationResult` has `storage` (OZ's report) and `safetyErrors` instead of `errors`; `ValidationError` and `filterSafetyErrors` are removed.
 
-## 0.1.0-alpha.1 (2026-04-08)
+## 0.1.0-alpha.1
 
 Initial alpha release.
 

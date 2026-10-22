@@ -61,7 +61,7 @@ export interface ProxyUpgradeOptions {
   /**
    * The proxy kind, for OZ's safety rules. Defaults to the baseline's (`beacon`
    * when a beacon serves the proxy, else the kind its running implementation's
-   * code implies). Records made before 0.1.0-alpha.4 do not hold it, and the
+   * code implies). Records made before 0.2.0 do not hold it, and the
    * new implementation's code is used then, which reads an implementation that
    * dropped `upgradeTo` as "transparent": pass "uups" for a UUPS proxy.
    */

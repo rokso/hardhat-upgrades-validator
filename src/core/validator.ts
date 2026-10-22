@@ -180,7 +180,7 @@ function fromCheck(
       contractName,
       reason:
         `the ${unlisted ? "new implementation's record" : "baseline"} has no recorded ` +
-        "namespace slots (a record made before 0.1.0-alpha.4, or the deprecated " +
+        "namespace slots (a record made before 0.2.0, or the deprecated " +
         "upgradeStorageLayout field). Record it again with `record-baseline --force` (add " +
         "--from-chain if the local build has moved on).",
     });
